@@ -75,9 +75,8 @@ mower_logic:
   emergency_lift_period: -1
   emergency_tilt_period: -1
   ignore_charging_current: false
-  # Once you validated the functionality of your emergency sensors,
-  # set this to true to enable the mow-motor
-  enable_mower: false
+  # The simulated mow motor reports its RPM, so the spinup check runs like on a real mower
+  enable_mower: true
 
 xbot_monitoring:
   # For an external (e.g. Home Assistant) integration only - the app itself doesn't use

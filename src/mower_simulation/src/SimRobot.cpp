@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <boost/thread/pthread/thread_data.hpp>
+#include <cmath>
 
 constexpr double SimRobot::BATTERY_VOLTS_MIN;
 constexpr double SimRobot::BATTERY_VOLTS_MAX;
@@ -203,6 +204,7 @@ void SimRobot::SimulationStep(const ros::TimerEvent& te) {
     PublishPosition();
     return;
   }
+  const double step_s = (now - last_update_).toSec();
   // Update Position if not in emergency mode. Any emergency reason (latch, timeout, ...)
   // stops the robot, mirroring the firmware.
   if (emergency_reasons_ != 0) {
@@ -263,7 +265,7 @@ void SimRobot::SimulationStep(const ros::TimerEvent& te) {
   if (is_charging_) {
     if (battery_volts_ < BATTERY_VOLTS_MAX) {
       charger_state_ = "CC";
-      battery_volts_ += 0.05;
+      battery_volts_ += CHARGE_VOLTS_PER_S * step_s;
       if (battery_volts_ > BATTERY_VOLTS_MAX) {
         battery_volts_ = BATTERY_VOLTS_MAX;
       }
@@ -273,7 +275,7 @@ void SimRobot::SimulationStep(const ros::TimerEvent& te) {
       charger_state_ = "CV";
       battery_volts_ = BATTERY_VOLTS_MAX;
       charger_volts_ = CHARGE_VOLTS;
-      charge_current_ = charge_current_ * 0.99;
+      charge_current_ *= std::pow(CV_CURRENT_DECAY_PER_S, step_s);
     } else {
       charger_state_ = "Done";
       battery_volts_ = BATTERY_VOLTS_MAX;
@@ -282,7 +284,7 @@ void SimRobot::SimulationStep(const ros::TimerEvent& te) {
     }
   } else {
     charger_state_ = "Not Charging";
-    battery_volts_ = std::max(BATTERY_VOLTS_MIN, battery_volts_ - 0.001);
+    battery_volts_ = std::max(BATTERY_VOLTS_MIN, battery_volts_ - DISCHARGE_VOLTS_PER_S * step_s);
     charger_volts_ = 0.0;
     charge_current_ = 0.0;
   }

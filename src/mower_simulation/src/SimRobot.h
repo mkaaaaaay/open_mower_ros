@@ -89,6 +89,12 @@ class SimRobot {
   static constexpr double BATTERY_VOLTS_MAX = 4.18 * 7;
   static constexpr double CHARGE_CURRENT = 2.5;
   static constexpr double CHARGE_VOLTS = 32.0;
+  // Rates per second, so they don't depend on the simulation step. Charging is kept fast on purpose.
+  // Discharging takes about an hour from full to empty.
+  static constexpr double CHARGE_VOLTS_PER_S = 0.5;
+  static constexpr double DISCHARGE_VOLTS_PER_S = (BATTERY_VOLTS_MAX - BATTERY_VOLTS_MIN) / 3600.0;
+  // Fraction of the CV charge current left after one second.
+  static constexpr double CV_CURRENT_DECAY_PER_S = 0.9;
 
   // Lock for all getters and setters and the simulation step
   std::mutex state_mutex_;
