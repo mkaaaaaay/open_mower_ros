@@ -209,6 +209,26 @@ bool MowingBehavior::plan_area(const mower_map::MapArea& area, const mower_logic
     ROS_INFO_STREAM("MowingBehavior: Auto-detected mowing angle + mowing angle offset: " << angle);
   }
 
+  // Keep the angle within the area's range, if it has one. Past the end it bounces back, so with an increment the
+  // stripes keep changing direction instead of jumping from one end to the other.
+  if (!std::isnan(area.angle_min) && !std::isnan(area.angle_max)) {
+    const double lo = area.angle_min;
+    double width = area.angle_max - lo;
+    // max < min is a range across +-180 degrees
+    if (width < 0) width += 2 * M_PI;
+    if (width == 0) {
+      angle = lo;
+    } else if (width < 2 * M_PI) {
+      // the same direction can be written +-360 degrees apart, use the one closest to the middle of the range
+      const double mid = lo + width / 2;
+      angle = mid + std::remainder(angle - mid, 2 * M_PI);
+      double t = std::fmod(angle - lo, 2 * width);
+      if (t < 0) t += 2 * width;
+      angle = lo + (t <= width ? t : 2 * width - t);
+    }
+    ROS_INFO_STREAM("MowingBehavior: Mowing angle within the area's range: " << angle);
+  }
+
   // calculate coverage
   auto overrideOrGlobal = [](auto override, auto global, auto sentinel) {
     return (override != sentinel) ? override : global;
