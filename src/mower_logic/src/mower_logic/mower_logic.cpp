@@ -747,7 +747,7 @@ nlohmann::json planArea(const nlohmann::json& params) {
   if (params.contains("outline_offset")) area.outline_offset = number("outline_offset");
   if (params.contains("angle_min")) area.angle_min = number("angle_min");
   if (params.contains("angle_max")) area.angle_max = number("angle_max");
-  if (area.area.points.size() < 3) invalidParam("the area needs an outline (area_id or outline)");
+  if (area.area.points.size() < 3) invalidParam("the area needs at least 3 outline points (area_id or outline)");
 
   // own client, mowing may use pathClient at the same time
   auto planner = n.serviceClient<slic3r_coverage_planner::PlanPath>("slic3r_coverage_planner/plan_path");
