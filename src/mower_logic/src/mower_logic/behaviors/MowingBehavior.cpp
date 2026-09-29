@@ -213,23 +213,28 @@ bool MowingBehavior::create_mowing_plan(int area_index) {
     ROS_INFO_STREAM("MowingBehavior: Auto-detected mowing angle + mowing angle offset: " << angle);
   }
 
-  // Keep the angle within the area's range, if it has one. Past the end it bounces back, so with an increment the
-  // stripes keep changing direction instead of jumping from one end to the other.
+  // Keep the stripes within the area's range, if it has one. It's about their direction, 0 and 180 degrees give
+  // the same stripes, so an angle already in the range stays. Past an end it bounces back, so with an increment
+  // the stripes keep changing direction instead of jumping from one end to the other.
   const auto& range = mapSrv.response.area;
   if (!std::isnan(range.angle_min) && !std::isnan(range.angle_max)) {
     const double lo = range.angle_min;
-    double width = range.angle_max - lo;
-    // max < min is a range across +-180 degrees
-    if (width < 0) width += 2 * M_PI;
-    if (width == 0) {
-      angle = lo;
-    } else if (width < 2 * M_PI) {
-      // the same direction can be written +-360 degrees apart, use the one closest to the middle of the range
-      const double mid = lo + width / 2;
-      angle = mid + std::remainder(angle - mid, 2 * M_PI);
-      double t = std::fmod(angle - lo, 2 * width);
-      if (t < 0) t += 2 * width;
-      angle = lo + (t <= width ? t : 2 * width - t);
+    const double d = range.angle_max - lo;
+    // half a turn or more allows every direction
+    if (d < M_PI) {
+      // max < min is a range across the ends, e.g. 170 to -170 degrees around 180
+      double width = std::fmod(d, M_PI);
+      if (width < 0) width += M_PI;
+      if (width == 0) {
+        angle = lo;
+      } else {
+        // the same stripes can be written +-180 degrees apart, use the one closest to the middle of the range
+        const double mid = lo + width / 2;
+        angle = mid + std::remainder(angle - mid, M_PI);
+        double t = std::fmod(angle - lo, 2 * width);
+        if (t < 0) t += 2 * width;
+        angle = lo + (t <= width ? t : 2 * width - t);
+      }
     }
     ROS_INFO_STREAM("MowingBehavior: Mowing angle within the area's range: " << angle);
   }
