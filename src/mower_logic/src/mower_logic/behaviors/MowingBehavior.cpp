@@ -75,6 +75,9 @@ Behavior* MowingBehavior::execute() {
       currentMowingArea = 0;
       currentMowingPath = 0;
       currentMowingPathIndex = 0;
+      currentMowingPlanDigest = "";
+      // otherwise a restart before the next regular checkpoint would find the same stale area again
+      checkpoint();
     }
   }
 
