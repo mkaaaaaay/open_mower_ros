@@ -127,13 +127,13 @@ void SimRpc::Start() {
   });
 
   // A clean start for a test: the robot is put on the dock with a full battery, no emergency, good GPS, a dry rain
-  // sensor and the default battery rates. mower_logic gets its emergency reset, a job that's running is aborted
-  // and an interrupted one dropped (reset_job, only where mower_logic has it, and only once it's idle, so call
-  // this again after an abort).
+  // sensor and the default battery rates. mower_logic gets its emergency reset, an area recording is left without
+  // saving, a job that's running is aborted and an interrupted one dropped (reset_job, only where mower_logic has it,
+  // and only once it's idle, so call this again after an abort).
   rpc_provider_.addMethod("sim.reset", [this](const std::string&, const nlohmann::basic_json<>&) -> json {
     robot_.Reset();
-    for (const char* action :
-         {"mower_logic/reset_emergency", "mower_logic:mowing/abort_mowing", "mower_logic:idle/reset_job"}) {
+    for (const char* action : {"mower_logic/reset_emergency", "mower_logic:area_recording/exit_recording_mode",
+                               "mower_logic:mowing/abort_mowing", "mower_logic:idle/reset_job"}) {
       std_msgs::String msg;
       msg.data = action;
       action_pub_.publish(msg);
