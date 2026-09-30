@@ -66,6 +66,14 @@ TEST(LogBuffer, UrlRunningIntoTheCutShowsNoLogin) {
   EXPECT_EQ(out.substr(out.size() - 10), "http://...");
 }
 
+// the password itself contains :// (found in review)
+TEST(LogBuffer, PasswordWithSchemeInTheCut) {
+  const auto out = kept("mqtt://alice:SECRET://" + std::string(2000, 'x') + "@broker");
+  EXPECT_FALSE(contains(out, "alice")) << out;
+  EXPECT_FALSE(contains(out, "SECRET")) << out;
+  EXPECT_EQ(out, "mqtt://...");
+}
+
 // a multi byte character at every position around the cut: the answer stays valid utf-8
 TEST(LogBuffer, CutsAtACharacterBoundary) {
   for (const std::string ch : {"\xC3\xBC", "\xE2\x82\xAC", "\xF0\x9F\xA6\x94"}) {  // ü € hedgehog
