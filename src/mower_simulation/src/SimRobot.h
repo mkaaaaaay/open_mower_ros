@@ -68,6 +68,15 @@ class SimRobot {
   // [BATTERY_VOLTS_MIN, BATTERY_VOLTS_MAX] range are allowed so the app can
   // simulate critically low / critically high (over-voltage) faults.
   void SetBatteryVolts(double volts);
+  // Charge and discharge speed of the battery in V/s, e.g. to charge within seconds in a test. Values <= 0 keep
+  // the current one.
+  void SetBatteryRates(double charge_volts_per_s, double discharge_volts_per_s);
+  // Wet rain sensor, reported to the high level by the simulated mower service.
+  void SetRain(bool rain);
+  bool IsRaining();
+  // A clean start for a test: on the dock and charging, battery full, no emergency, good GPS, dry rain sensor,
+  // moving allowed, no joystick override and the default battery rates.
+  void Reset();
 
   // Snapshot of the simulation control state, streamed to the app via MQTT.
   struct SimControlState {
@@ -80,6 +89,9 @@ class SimRobot {
     double battery_percentage;
     bool charging;
     bool joy_override;
+    bool rain;
+    double charge_volts_per_s;
+    double discharge_volts_per_s;
   };
   SimControlState GetSimControlState();
 
@@ -95,6 +107,10 @@ class SimRobot {
   static constexpr double DISCHARGE_VOLTS_PER_S = (BATTERY_VOLTS_MAX - BATTERY_VOLTS_MIN) / 3600.0;
   // Fraction of the CV charge current left after one second.
   static constexpr double CV_CURRENT_DECAY_PER_S = 0.9;
+  // Rates in use, the constants above unless a test changes them
+  double charge_volts_per_s_ = CHARGE_VOLTS_PER_S;
+  double discharge_volts_per_s_ = DISCHARGE_VOLTS_PER_S;
+  bool rain_ = false;
 
   // Lock for all getters and setters and the simulation step
   std::mutex state_mutex_;

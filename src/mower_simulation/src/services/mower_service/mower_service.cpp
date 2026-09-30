@@ -17,7 +17,7 @@ void MowerService::tick() {
   robot_.GetEmergencyState(unused1, emergency, unused2);
   bool running = !emergency && mower_running_;
   SendMowerRunning(running);
-  SendRainDetected(false);
+  SendRainDetected(robot_.IsRaining());
   SendMowerMotorCurrent(running ? 1.0 : 0.0);
   SendMowerMotorRPM(running ? 4500.0 : 0);
   SendMowerStatus(200);

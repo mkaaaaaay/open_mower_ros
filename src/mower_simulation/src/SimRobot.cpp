@@ -95,6 +95,41 @@ void SimRobot::SetBatteryVolts(double volts) {
   battery_volts_ = std::max(0.0, volts);
 }
 
+void SimRobot::SetBatteryRates(double charge_volts_per_s, double discharge_volts_per_s) {
+  std::lock_guard<std::mutex> lk{state_mutex_};
+  if (charge_volts_per_s > 0) charge_volts_per_s_ = charge_volts_per_s;
+  if (discharge_volts_per_s > 0) discharge_volts_per_s_ = discharge_volts_per_s;
+}
+
+void SimRobot::SetRain(bool rain) {
+  std::lock_guard<std::mutex> lk{state_mutex_};
+  rain_ = rain;
+}
+
+bool SimRobot::IsRaining() {
+  std::lock_guard<std::mutex> lk{state_mutex_};
+  return rain_;
+}
+
+void SimRobot::Reset() {
+  std::lock_guard<std::mutex> lk{state_mutex_};
+  pos_x_ = docking_pos_x_;
+  pos_y_ = docking_pos_y_;
+  pos_heading_ = docking_pos_heading_;
+  vx_ = 0.0;
+  vr_ = 0.0;
+  is_charging_ = true;
+  charging_started_time = ros::Time::now();
+  battery_volts_ = BATTERY_VOLTS_MAX;
+  emergency_reasons_ = 0;
+  gps_good_ = true;
+  movement_allowed_ = true;
+  joy_override_ = false;
+  rain_ = false;
+  charge_volts_per_s_ = CHARGE_VOLTS_PER_S;
+  discharge_volts_per_s_ = DISCHARGE_VOLTS_PER_S;
+}
+
 SimRobot::SimControlState SimRobot::GetSimControlState() {
   std::lock_guard<std::mutex> lk{state_mutex_};
   SimControlState state{};
@@ -108,6 +143,9 @@ SimRobot::SimControlState SimRobot::GetSimControlState() {
       std::max(0.0, std::min(1.0, (battery_volts_ - BATTERY_VOLTS_MIN) / (BATTERY_VOLTS_MAX - BATTERY_VOLTS_MIN)));
   state.charging = is_charging_;
   state.joy_override = joy_override_;
+  state.rain = rain_;
+  state.charge_volts_per_s = charge_volts_per_s_;
+  state.discharge_volts_per_s = discharge_volts_per_s_;
   return state;
 }
 
@@ -265,7 +303,7 @@ void SimRobot::SimulationStep(const ros::TimerEvent& te) {
   if (is_charging_) {
     if (battery_volts_ < BATTERY_VOLTS_MAX) {
       charger_state_ = "CC";
-      battery_volts_ += CHARGE_VOLTS_PER_S * step_s;
+      battery_volts_ += charge_volts_per_s_ * step_s;
       if (battery_volts_ > BATTERY_VOLTS_MAX) {
         battery_volts_ = BATTERY_VOLTS_MAX;
       }
@@ -284,7 +322,10 @@ void SimRobot::SimulationStep(const ros::TimerEvent& te) {
     }
   } else {
     charger_state_ = "Not Charging";
-    battery_volts_ = std::max(BATTERY_VOLTS_MIN, battery_volts_ - DISCHARGE_VOLTS_PER_S * step_s);
+    // a voltage set below empty (sim.battery.set) stays there instead of being pulled back up to empty
+    if (battery_volts_ > BATTERY_VOLTS_MIN) {
+      battery_volts_ = std::max(BATTERY_VOLTS_MIN, battery_volts_ - discharge_volts_per_s_ * step_s);
+    }
     charger_volts_ = 0.0;
     charge_current_ = 0.0;
   }

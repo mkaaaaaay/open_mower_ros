@@ -4,6 +4,7 @@
 
 #include "SimRpc.h"
 
+#include <std_msgs/String.h>
 #include <xbot_mqtt/MqttPublish.h>
 #include <xbot_mqtt/RpcError.h>
 #include <xbot_mqtt/publish.h>
@@ -58,6 +59,9 @@ json toJson(const SimRobot::SimControlState& s) {
   state["battery_percentage"] = s.battery_percentage;
   state["charging"] = s.charging;
   state["joy_override"] = s.joy_override;
+  state["rain"] = s.rain;
+  state["charge_volts_per_s"] = s.charge_volts_per_s;
+  state["discharge_volts_per_s"] = s.discharge_volts_per_s;
   return state;
 }
 
@@ -68,6 +72,7 @@ SimRpc::SimRpc(ros::NodeHandle& nh, SimRobot& robot) : robot_(robot), nh_(nh), r
 
 void SimRpc::Start() {
   mqtt_publish_pub_ = nh_.advertise<xbot_mqtt::MqttPublish>("/xbot_monitoring/mqtt_publish", 10);
+  action_pub_ = nh_.advertise<std_msgs::String>("/xbot/action", 10);
 
   // Set / clear the emergency. Setting it latches the emergency in SimRobot; the latch
   // stays active (robot stopped) until it is explicitly cleared - either here with
@@ -95,6 +100,44 @@ void SimRpc::Start() {
   // Set the simulated battery pack voltage.
   rpc_provider_.addMethod("sim.battery.set", [this](const std::string&, const nlohmann::basic_json<>& params) -> json {
     robot_.SetBatteryVolts(requireNumber(params, "voltage"));
+    PublishState();
+    return nullptr;
+  });
+
+  // How fast the battery charges and discharges, in V/s. Either can be left out. Charging is 0.5 V/s by default,
+  // discharging from full to empty takes about an hour.
+  rpc_provider_.addMethod("sim.battery.rates.set",
+                          [this](const std::string&, const nlohmann::basic_json<>& params) -> json {
+                            const double charge = optionalNumber(params, "charge", 0.0);
+                            const double discharge = optionalNumber(params, "discharge", 0.0);
+                            if (charge <= 0 && discharge <= 0) {
+                              throw xbot_mqtt::RpcException(xbot_mqtt::RpcError::ERROR_INVALID_PARAMS,
+                                                            "charge or discharge (V/s, above 0) needed");
+                            }
+                            robot_.SetBatteryRates(charge, discharge);
+                            PublishState();
+                            return nullptr;
+                          });
+
+  // Wet or dry rain sensor.
+  rpc_provider_.addMethod("sim.rain.set", [this](const std::string&, const nlohmann::basic_json<>& params) -> json {
+    robot_.SetRain(requireBool(params, "active"));
+    PublishState();
+    return nullptr;
+  });
+
+  // A clean start for a test: the robot is put on the dock with a full battery, no emergency, good GPS, a dry rain
+  // sensor and the default battery rates. mower_logic gets its emergency reset, a job that's running is aborted
+  // and an interrupted one dropped (reset_job, only where mower_logic has it, and only once it's idle, so call
+  // this again after an abort).
+  rpc_provider_.addMethod("sim.reset", [this](const std::string&, const nlohmann::basic_json<>&) -> json {
+    robot_.Reset();
+    for (const char* action :
+         {"mower_logic/reset_emergency", "mower_logic:mowing/abort_mowing", "mower_logic:idle/reset_job"}) {
+      std_msgs::String msg;
+      msg.data = action;
+      action_pub_.publish(msg);
+    }
     PublishState();
     return nullptr;
   });

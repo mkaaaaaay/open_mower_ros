@@ -29,6 +29,8 @@ class SimRpc {
   ros::NodeHandle& nh_;
 
   ros::Publisher mqtt_publish_pub_;
+  // mower_logic's actions, for sim.reset
+  ros::Publisher action_pub_;
   ros::Timer publish_timer_;
   xbot_mqtt::RpcProvider rpc_provider_;
 };
