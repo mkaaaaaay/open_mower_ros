@@ -124,7 +124,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Point, x, y)
 // The properties of an area this version keeps in map.json, others are dropped when the map is loaded. Apps ask for
 // them (map.area_properties) to only offer settings that work, so a new property belongs in this list too.
 const std::vector<std::string> AREA_PROPERTIES = {
-    "name", "type", "active", "mowable", "angle", "outline_count", "outline_overlap_count", "outline_offset",
+    "name",           "type",      "active",    "mowable", "angle", "outline_count", "outline_overlap_count",
+    "outline_offset", "angle_min", "angle_max",
 };
 
 void to_json(json& j, const MapArea& data) {
