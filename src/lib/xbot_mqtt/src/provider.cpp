@@ -14,6 +14,8 @@ void RpcProvider::init(ros::NodeHandle n) {
   response_pub = n.advertise<xbot_mqtt::RpcResponse>(TOPIC_RESPONSE, 100);
   error_pub = n.advertise<xbot_mqtt::RpcError>(TOPIC_ERROR, 100);
   registration_client = n.serviceClient<xbot_mqtt::RegisterMethodsSrv>(SERVICE_REGISTER_METHODS);
+  // xbot_monitoring forgets the methods when it restarts, e.g. with open_mower_ros while other nodes keep running
+  registry_sub = n.subscribe(TOPIC_REGISTRY, 1, &RpcProvider::onRegistry, this);
   if (!registration_client.waitForExistence(ros::Duration(10.0))) {
     ROS_ERROR_STREAM("RPC method registration service not found");
     // Don't abort here - RPC isn't critical for the system to function.
