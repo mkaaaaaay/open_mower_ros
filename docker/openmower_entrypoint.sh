@@ -22,6 +22,17 @@ case "${DEBUG:-0}" in
 esac
 shopt -u nocasematch || true
 
+# LOG_LEVEL=INFO (or DEBUG) shows more than the warnings and errors of the default config, without the file
+# logging DEBUG=1 switches on. For tests that look for certain log lines
+case "${LOG_LEVEL^^}" in
+    DEBUG|INFO|WARN|ERROR|FATAL)
+        if [ -n "${ROSCONSOLE_CONFIG_FILE:-}" ]; then
+            printf 'log4j.threshold=%s\n' "${LOG_LEVEL^^}" > /tmp/rosconsole.config
+            export ROSCONSOLE_CONFIG_FILE=/tmp/rosconsole.config
+        fi
+    ;;
+esac
+
 # Ensure stdout and stderr are unbuffered to get logging in real time order
 export ROSCONSOLE_STDOUT_LINE_BUFFERED=1
 export PYTHONUNBUFFERED=1
