@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ros/ros.h>
+#include <std_msgs/Empty.h>
 #include <xbot_mqtt/RpcError.h>
 #include <xbot_mqtt/RpcRequest.h>
 #include <xbot_mqtt/RpcResponse.h>
@@ -38,7 +39,11 @@ class RpcProvider {
   ros::Publisher response_pub;
   ros::Publisher error_pub;
   ros::ServiceClient registration_client;
+  ros::Subscriber registry_sub;
 
+  void onRegistry(const std_msgs::Empty::ConstPtr&) {
+    publishMethods();
+  }
   void handleRequest(const xbot_mqtt::RpcRequest::ConstPtr& request);
   void publishResponse(const xbot_mqtt::RpcRequest::ConstPtr& request, const nlohmann::basic_json<>& response);
   void publishError(const xbot_mqtt::RpcRequest::ConstPtr& request, int16_t code, const std::string& message);

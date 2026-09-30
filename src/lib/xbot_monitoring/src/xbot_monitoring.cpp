@@ -17,6 +17,7 @@
 #include "capabilities.h"
 #include "geometry_msgs/Twist.h"
 #include "ros/ros.h"
+#include "std_msgs/Empty.h"
 #include "std_msgs/String.h"
 #include "xbot_mqtt/RegisterMethodsSrv.h"
 #include "xbot_mqtt/RpcError.h"
@@ -897,6 +898,9 @@ int main(int argc, char **argv) {
     ros::Subscriber rpc_response_sub = n->subscribe(xbot_mqtt::TOPIC_RESPONSE, 100, rpc_response_callback);
     ros::Subscriber rpc_error_sub = n->subscribe(xbot_mqtt::TOPIC_ERROR, 100, rpc_error_callback);
     ros::ServiceServer register_methods_service = n->advertiseService(xbot_mqtt::SERVICE_REGISTER_METHODS, register_methods);
+    // tells the nodes that are already running to register their methods again
+    ros::Publisher registry_pub = n->advertise<std_msgs::Empty>(xbot_mqtt::TOPIC_REGISTRY, 1, true);
+    registry_pub.publish(std_msgs::Empty());
 
     ros::AsyncSpinner spinner(1);
     spinner.start();
