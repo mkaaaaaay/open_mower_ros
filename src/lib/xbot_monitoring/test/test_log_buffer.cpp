@@ -88,7 +88,8 @@ TEST(LogBuffer, CutsAtACharacterBoundary) {
 // a secret at every position around the cut: no part of it shows
 TEST(LogBuffer, SecretAcrossTheCut) {
   const std::string secret = "SECRETVALUE123";
-  for (const std::string form : {"http://user:" + secret + "@host:2101/M", "password=" + secret,
+  for (const std::string form : {"http://user:" + secret + "@host:2101/M", "mqtt://user:" + secret + "://x@host",
+                                 "password=" + secret,
                                  "\"token\": \"" + secret + "\"", "Bearer " + secret}) {
     for (size_t pos = 1960; pos <= 2000; pos++) {
       const auto out = kept(std::string(pos, 'a') + " " + form + " tail");
