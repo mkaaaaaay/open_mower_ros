@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install --no-install-recommends --yes \
 
 COPY --link docker-simulation/assets/supervisord.conf /etc/supervisor/conf.d/simulation.conf
 COPY --link docker-simulation/assets/mower_simulation_gui.launch /opt/mower_simulation_gui.launch
+COPY --link docker-simulation/assets/mower_simulation_headless.launch /opt/mower_simulation_headless.launch
 COPY --link docker-simulation/assets/entrypoint-sim.sh /entrypoint-sim.sh
 RUN chmod +x /entrypoint-sim.sh
 
