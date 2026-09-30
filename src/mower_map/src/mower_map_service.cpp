@@ -627,6 +627,13 @@ bool getMowingArea(mower_map::GetMowingAreaSrvRequest& req, mower_map::GetMowing
     res.area.obstacles.push_back(internalPolygonToGeometry(area.outline));
   }
 
+  // A mowing area that isn't mowable is left out where it lies within this one, e.g. wildflowers in the lawn.
+  // Otherwise it was mowed along with it. It stays drivable, the navigation map doesn't change
+  for (const auto& area : map_data.areas) {
+    if (!area.active || area.type != "mow" || area.mowable || area.id == mowing_areas[req.index].id) continue;
+    res.area.obstacles.push_back(internalPolygonToGeometry(area.outline));
+  }
+
   return true;
 }
 
