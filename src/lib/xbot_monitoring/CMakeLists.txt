@@ -68,3 +68,8 @@ add_executable(heatmap_generator
 
 add_dependencies(heatmap_generator ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
 target_link_libraries(heatmap_generator ${catkin_LIBRARIES})
+
+if (CATKIN_ENABLE_TESTING)
+    catkin_add_gtest(test_log_buffer test/test_log_buffer.cpp)
+    target_link_libraries(test_log_buffer ${catkin_LIBRARIES} nlohmann_json::nlohmann_json)
+endif ()
