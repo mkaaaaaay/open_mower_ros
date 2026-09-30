@@ -4,7 +4,13 @@
     of the CPU the simulation container needs.
 -->
 <launch>
+    <!-- SIM_CLOCK_FACTOR above 0: simulated time runs that many times as fast (experimental, see
+         mower_simulation.cpp). /use_sim_time has to be set here, before open_mower_ros starts its nodes -->
+    <arg name="clock_factor" default="$(optenv SIM_CLOCK_FACTOR 0)"/>
+    <param name="/use_sim_time" value="true" if="$(eval float(arg('clock_factor')) > 0)"/>
+
     <node pkg="mower_simulation" type="mower_simulation" name="mower_simulation" required="true">
         <param name="publish_tf" value="false"/>
+        <param name="clock_factor" value="$(arg clock_factor)"/>
     </node>
 </launch>

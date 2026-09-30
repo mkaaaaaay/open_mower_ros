@@ -57,6 +57,8 @@ services:
       - DISPLAY_RESOLUTION=${DISPLAY_RESOLUTION:-1280x800x24}
       # 1: only the simulation, without desktop, VNC and rviz (automatic tests)
       - HEADLESS=${HEADLESS:-0}
+      # above 0 (headless only): simulated time runs that many times as fast, experimental
+      - SIM_CLOCK_FACTOR=${SIM_CLOCK_FACTOR:-0}
     # Mount the rviz config from source (read-write) so tweaks saved from the running
     # rviz land back in the checked-out file and can be committed, instead of being lost
     # inside the container image on the next rebuild.

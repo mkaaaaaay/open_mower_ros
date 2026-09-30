@@ -9,6 +9,7 @@ project(mower_simulation)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
         roscpp
+        rosgraph_msgs
         tf2
         tf2_geometry_msgs
         tf2_ros

@@ -18,9 +18,12 @@
 #include <mower_msgs/ESCStatus.h>
 #include <mower_msgs/Emergency.h>
 #include <mower_msgs/Power.h>
+#include <rosgraph_msgs/Clock.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
+#include <chrono>
+#include <thread>
 #include <xbot-service/Io.hpp>
 #include <xbot-service/portable/system.hpp>
 
@@ -51,6 +54,30 @@ int main(int argc, char** argv) {
 
   ros::NodeHandle n;
   ros::NodeHandle paramNh("~");
+
+  // Time lapse for tests: with ~clock_factor above 0 (and /use_sim_time set before the other nodes start) this
+  // publishes /clock running that many times as fast as the wall clock. Only the ROS side follows it, the simulated
+  // services (IMU, GPS, wheel ticks, heartbeats) still tick on the wall clock in xbot_framework, so they come less
+  // often per simulated second the higher the factor is.
+  double clock_factor = 0;
+  paramNh.param("clock_factor", clock_factor, 0.0);
+  ros::Publisher clock_pub;
+  std::thread clock_thread;
+  if (clock_factor > 0) {
+    clock_pub = n.advertise<rosgraph_msgs::Clock>("/clock", 1);
+    clock_thread = std::thread([&clock_pub, clock_factor]() {
+      const auto start = std::chrono::steady_clock::now();
+      const ros::Time origin(ros::WallTime::now().toSec());
+      rosgraph_msgs::Clock msg;
+      while (ros::ok()) {
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        msg.clock = origin + ros::Duration(elapsed * clock_factor);
+        clock_pub.publish(msg);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+    });
+    ROS_WARN_STREAM("Simulated time runs " << clock_factor << " times as fast as the wall clock");
+  }
 
   reconfig_server = new dynamic_reconfigure::Server<mower_simulation::MowerSimulationConfig>(paramNh);
   // reconfig_server->setCallback(reconfigureCB);
@@ -126,6 +153,7 @@ int main(int argc, char** argv) {
   robot.Start();
 
   ros::spin();
+  if (clock_thread.joinable()) clock_thread.join();
   delete (reconfig_server);
   return 0;
 }
