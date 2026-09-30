@@ -121,6 +121,12 @@ struct MapData {
 // JSON serialization macros
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Point, x, y)
 
+// The properties of an area this version keeps in map.json, others are dropped when the map is loaded. Apps ask for
+// them (map.area_properties) to only offer settings that work, so a new property belongs in this list too.
+const std::vector<std::string> AREA_PROPERTIES = {
+    "name", "type", "active", "mowable", "angle", "outline_count", "outline_overlap_count", "outline_offset",
+};
+
 void to_json(json& j, const MapArea& data) {
   j["id"] = data.id;
   json properties = json::object();
@@ -225,6 +231,9 @@ xbot_mqtt::RpcProvider rpc_provider("mower_map_service", {{
     ROS_INFO_STREAM("Loaded " << map_data.areas.size() << " areas via RPC and saved to file");
     buildMap();
     return "Successfully stored map (" + std::to_string(map_data.areas.size()) + " areas)";
+  }),
+  RPC_METHOD("map.area_properties", {
+    return AREA_PROPERTIES;
   }),
 }});
 // clang-format on
