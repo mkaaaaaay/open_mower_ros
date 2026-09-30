@@ -12,6 +12,7 @@
 // You should have received a copy of the GNU General Public License along with OpenMower. If not, see
 // <https://www.gnu.org/licenses/>.
 //
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -611,6 +612,20 @@ bool addMowingArea(mower_map::AddMowingAreaSrvRequest& req, mower_map::AddMowing
   return true;
 }
 
+// Whether the point lies within the polygon or less than 5 cm off its edge, an edge shared with a neighbour is never
+// exactly on it
+bool insideOrOnEdge(const Polygon& poly, const Point& p) {
+  bool inside = false;
+  for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+    const Point &a = poly[i], &b = poly[j];
+    if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    const double dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
+    const double t = len2 > 0 ? std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / len2, 0.0, 1.0) : 0.0;
+    if (std::hypot(p.x - a.x - t * dx, p.y - a.y - t * dy) < 0.05) return true;
+  }
+  return inside;
+}
+
 bool getMowingArea(mower_map::GetMowingAreaSrvRequest& req, mower_map::GetMowingAreaSrvResponse& res) {
   ROS_INFO_STREAM("Got getMowingArea call with index: " << req.index);
 
@@ -628,9 +643,14 @@ bool getMowingArea(mower_map::GetMowingAreaSrvRequest& req, mower_map::GetMowing
   }
 
   // A mowing area that isn't mowable is left out where it lies within this one, e.g. wildflowers in the lawn.
-  // Otherwise it was mowed along with it. It stays drivable, the navigation map doesn't change
+  // Otherwise it was mowed along with it. The inner one counts, so this one lying within it is mowed as usual. It
+  // stays drivable, the navigation map doesn't change
+  const auto& requested = mowing_areas[req.index];
   for (const auto& area : map_data.areas) {
-    if (!area.active || area.type != "mow" || area.mowable || area.id == mowing_areas[req.index].id) continue;
+    if (!area.active || area.type != "mow" || area.mowable || area.id == requested.id) continue;
+    const bool around = std::all_of(requested.outline.begin(), requested.outline.end(),
+                                    [&](const Point& p) { return insideOrOnEdge(area.outline, p); });
+    if (around) continue;
     res.area.obstacles.push_back(internalPolygonToGeometry(area.outline));
   }
 
