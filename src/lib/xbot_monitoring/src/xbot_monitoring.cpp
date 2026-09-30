@@ -16,6 +16,7 @@
 #include "PositionHistory.h"
 #include "capabilities.h"
 #include "geometry_msgs/Twist.h"
+#include "ros/callback_queue.h"
 #include "ros/ros.h"
 #include "std_msgs/Empty.h"
 #include "std_msgs/String.h"
@@ -897,7 +898,14 @@ int main(int argc, char **argv) {
     rpc_request_pub = n->advertise<xbot_mqtt::RpcRequest>(xbot_mqtt::TOPIC_REQUEST, 100);
     ros::Subscriber rpc_response_sub = n->subscribe(xbot_mqtt::TOPIC_RESPONSE, 100, rpc_response_callback);
     ros::Subscriber rpc_error_sub = n->subscribe(xbot_mqtt::TOPIC_ERROR, 100, rpc_error_callback);
-    ros::ServiceServer register_methods_service = n->advertiseService(xbot_mqtt::SERVICE_REGISTER_METHODS, register_methods);
+    // own queue and thread: this node's provider registers again from a callback on the main queue and would wait for
+    // itself there
+    ros::CallbackQueue register_queue;
+    ros::NodeHandle register_nh;
+    register_nh.setCallbackQueue(&register_queue);
+    ros::ServiceServer register_methods_service = register_nh.advertiseService(xbot_mqtt::SERVICE_REGISTER_METHODS, register_methods);
+    ros::AsyncSpinner register_spinner(1, &register_queue);
+    register_spinner.start();
     // tells the nodes that are already running to register their methods again
     ros::Publisher registry_pub = n->advertise<std_msgs::Empty>(xbot_mqtt::TOPIC_REGISTRY, 1, true);
     registry_pub.publish(std_msgs::Empty());
