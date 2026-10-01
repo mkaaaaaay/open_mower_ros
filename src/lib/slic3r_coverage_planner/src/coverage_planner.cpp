@@ -30,6 +30,8 @@ bool visualize_plan;
 // Fill the area cell by cell, each in one zigzag, and mow the cells and the rounds around obstacles in the order with
 // the least driving in between, instead of the slic3r fill order
 bool cell_fill;
+// U-turns between lanes at least this wide where they fit, 0: the lanes in order
+double turn_radius;
 ros::Publisher marker_array_publisher;
 
 
@@ -217,10 +219,14 @@ void traverse_from_right(std::vector<PerimeterGeneratorLoop> &contours, std::vec
 }
 
 // Points at most 10 cm apart that keep the corners. Equally spaced points cut them, the straight line between two of
-// them left the area a little at an inner corner and stopped short of the end of a lane
-Points spacedPoints(Polyline line) {
+// them left the area a little at an inner corner and stopped short of the end of a lane. Wiggles smaller than
+// tolerance are left out, a round along a recorded edge would follow every bit of gps noise, slow down and turn
+#ifndef ROUND_TOLERANCE
+#define ROUND_TOLERANCE 0.03
+#endif
+Points spacedPoints(Polyline line, double tolerance) {
     line.remove_duplicate_points();
-    line.simplify(scale_(0.005));
+    line.simplify(scale_(tolerance));
     Points points;
     for (size_t i = 0; i + 1 < line.points.size(); i++) {
         const Point &a = line.points[i], &b = line.points[i + 1];
@@ -241,7 +247,7 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
     Point lastPoint;
     bool is_first_point = true;
     for (int i = 0; i < group.size(); i++) {
-        auto points = spacedPoints(group[i].split_at_first_point());
+        auto points = spacedPoints(group[i].split_at_first_point(), ROUND_TOLERANCE);
         if (points.size() < 2) {
             ROS_INFO("Skipping single dot");
             continue;
@@ -351,14 +357,34 @@ struct CellLane {
 struct Cell {
     std::vector<CellLane> lanes;
     Polyline path;
+    // the ways to mow the lanes, rotated like them, each can also be driven backwards
+    std::vector<Polyline> zigzags;
 };
+
+// Lanes in blocks of 2k: 0, k, 1, k + 1, ... and the next block from its upper half, so neighbours in the order are at
+// least k - 1 lanes apart. A block at the end that is smaller is split in two halves the same way
+std::vector<int> skipOrder(int n, int k) {
+    std::vector<int> order;
+    bool low_first = true;
+    for (int start = 0; start < n; start += 2 * k) {
+        const int m = std::min(2 * k, n - start), half = (m + 1) / 2;
+        for (int i = 0; i < half; i++) {
+            const int low = start + i, high = start + half + i;
+            if (!low_first && high < start + m) order.push_back(high);
+            order.push_back(low);
+            if (low_first && high < start + m) order.push_back(high);
+        }
+        low_first = !low_first;
+    }
+    return order;
+}
 
 // Lanes along the angle, d apart, in cells. A cell goes on as long as each lane leads to exactly one in the next row
 // and both ends connect inside the area. Where the area splits (an obstacle, a bay) the part that overlaps most goes
 // on and the rest starts a cell of its own. Where parts join again all of them end, so the parts beside an obstacle
 // can be mowed one after the other before going on below it.
 std::vector<Cell> buildCells(const ExPolygons &area, const Polygons &inner, const Polygons &rounds, double angle,
-                             coord_t d, coord_t keep) {
+                             coord_t d, coord_t keep, coord_t turn_radius) {
     // nothing may leave the area or run into an obstacle, whatever the rounds are
     ExPolygons bounds = area;
     for (auto &b: bounds) {
@@ -616,6 +642,71 @@ std::vector<Cell> buildCells(const ExPolygons &area, const Polygons &inner, cons
             }
         }
     }
+
+    // At a lane end the mower turned on the spot twice, to the next lane and onto it, the wheels scrub the lawn at the
+    // same places each time. Mowing the lanes in a skip order (0, k, 1, k + 1, ...) the lanes it turns between are far
+    // enough apart for a U-turn both wheels roll forward on. The turn goes over the mowed rounds beyond the lane ends and
+    // has to stay in the area off the obstacles, where that doesn't fit for a cell its lanes are mowed in order
+    const ExPolygons turn_area = offset_ex(bounds, -float(keep));
+    const auto fits = [&](const Polyline &turn) {
+        for (const auto &ta: turn_area) {
+            if (ta.contains(turn)) return true;
+        }
+        return false;
+    };
+    const auto u_turn = [](const Point &a, const Point &b, bool right) {
+        Polyline turn;
+        const coord_t xm = right ? std::max(a.x, b.x) : std::min(a.x, b.x);
+        const double r = std::abs(double(b.y) - a.y) / 2, yc = (double(a.y) + b.y) / 2, up = b.y > a.y ? 1 : -1;
+        turn.points.push_back(a);
+        if (xm != a.x) turn.points.push_back(Point(xm, a.y));
+        const int steps = std::max(4, int(M_PI * r / scale_(0.05)));
+        for (int k = 1; k < steps; k++) {
+            const double th = -M_PI / 2 + M_PI * k / steps;
+            turn.points.push_back(Point((coord_t) (xm + (right ? r : -r) * std::cos(th)), (coord_t) (yc + up * r * std::sin(th))));
+        }
+        turn.points.push_back(Point(xm, b.y));
+        if (xm != b.x) turn.points.push_back(b);
+        return turn;
+    };
+    // left: the first lane runs from its left end
+    const auto zigzag = [&](const std::vector<CellLane> &lanes, const std::vector<int> &order, bool left) {
+        Polyline z;
+        for (size_t j = 0; j < order.size(); j++) {
+            const CellLane &lane = lanes[order[j]];
+            const bool forward = (j % 2 == 0) == left;
+            const Point start(forward ? lane.x0 : lane.x1, lane.y), end(forward ? lane.x1 : lane.x0, lane.y);
+            if (j > 0 && std::abs(order[j] - order[j - 1]) > 1) {
+                const Polyline turn = u_turn(z.points.back(), start, !forward);
+                if (!fits(turn)) return Polyline();
+                z.points.insert(z.points.end(), turn.points.begin() + 1, turn.points.end() - 1);
+            }
+            z.points.push_back(start);
+            z.points.push_back(end);
+        }
+        return z;
+    };
+    for (auto &cell: cells) {
+        if (cell.lanes.empty()) continue;
+        const int n = cell.lanes.size();
+        if (turn_radius > 0) {
+            // the widest skip first, down to half the radius
+            for (int k = int(std::ceil(2.0 * turn_radius / d)); k >= std::max(2, int(std::ceil(double(turn_radius) / d)));
+                 k--) {
+                const std::vector<int> order = skipOrder(n, k);
+                for (const bool left: {true, false}) {
+                    Polyline z = zigzag(cell.lanes, order, left);
+                    if (!z.points.empty()) cell.zigzags.push_back(z);
+                }
+                if (!cell.zigzags.empty()) break;
+            }
+        }
+        if (cell.zigzags.empty()) {
+            std::vector<int> order(n);
+            for (int i = 0; i < n; i++) order[i] = i;
+            for (const bool left: {true, false}) cell.zigzags.push_back(zigzag(cell.lanes, order, left));
+        }
+    }
     return cells;
 }
 
@@ -624,7 +715,7 @@ slic3r_coverage_planner::Path linePath(std_msgs::Header &header, const Polyline 
     slic3r_coverage_planner::Path path;
     path.is_outline = is_outline;
     path.path.header = header;
-    auto points = spacedPoints(line);
+    auto points = spacedPoints(line, 0.005);
     if (points.size() < 2) return path;
     for (size_t k = 0; k < points.size(); k++) {
         geometry_msgs::PoseStamped pose;
@@ -666,14 +757,7 @@ void appendCells(slic3r_coverage_planner::PlanPathResponse &res, std_msgs::Heade
             if (!variants.front().path.poses.empty()) items.push_back(variants);
             continue;
         }
-        for (int left = 0; left < 2; left++) {
-            Polyline zigzag;
-            for (size_t k = 0; k < cell.lanes.size(); k++) {
-                const CellLane &lane = cell.lanes[k];
-                const bool right = (k % 2 == 0) == (left == 1);
-                zigzag.points.push_back(Point(right ? lane.x0 : lane.x1, lane.y));
-                zigzag.points.push_back(Point(right ? lane.x1 : lane.x0, lane.y));
-            }
+        for (Polyline zigzag: cell.zigzags) {
             zigzag.rotate(angle);
             auto path = linePath(header, zigzag, false);
             if (path.path.poses.empty()) continue;
@@ -930,7 +1014,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         for (const auto &group: area_outlines) append_to(rounds, group);
         for (const auto &group: obstacle_outlines) append_to(rounds, group);
         cells = buildCells(area, inner, rounds, req.angle, scale_(req.distance),
-                           scale_(std::max(0.0, double(req.outer_offset)) + 0.01));
+                           scale_(std::max(0.0, double(req.outer_offset)) + 0.01), scale_(turn_radius));
     } else if (!req.skip_fill) {
         ExPolygons expp = union_ex(inner);
 
@@ -1125,6 +1209,7 @@ int main(int argc, char **argv) {
 
     visualize_plan = paramNh.param("visualize_plan", true);
     cell_fill = paramNh.param("cell_fill", false);
+    turn_radius = paramNh.param("turn_radius", 0.3);
 
     if (visualize_plan) {
         marker_array_publisher = n.advertise<visualization_msgs::MarkerArray>(
