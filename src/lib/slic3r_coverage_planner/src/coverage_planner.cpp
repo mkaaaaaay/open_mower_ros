@@ -330,6 +330,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     // This ExPolygon contains our input area with holes.
     Slic3r::ExPolygon expoly(outline_poly);
 
+    Polygons holes;
     for (auto &hole: req.holes) {
         Slic3r::Polygon hole_poly;
         for (auto &pt: hole.points) {
@@ -344,9 +345,15 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         // That makes the planner fill inside the obstacle instead of inside the area.
         Polygons clipped_holes = intersection(outline_poly, hole_poly);
         for (auto &clipped_hole: clipped_holes) {
-            clipped_hole.make_clockwise();
-            expoly.holes.push_back(clipped_hole);
+            clipped_hole.make_counter_clockwise();
+            holes.push_back(clipped_hole);
         }
+    }
+    // Obstacles that overlap are merged first. As separate holes their overlap cancelled out and was planned as lawn,
+    // the mower was sent into the obstacles there. A patch enclosed by obstacles can't be reached and is left out
+    for (auto &merged: union_ex(holes)) {
+        merged.contour.make_clockwise();
+        expoly.holes.push_back(merged.contour);
     }
 
 
