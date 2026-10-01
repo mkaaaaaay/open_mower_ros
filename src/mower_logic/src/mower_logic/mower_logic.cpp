@@ -440,27 +440,66 @@ bool isGpsGood() {
          (last_pose.flags & xbot_msgs::AbsolutePose::FLAG_SENSOR_FUSION_RECENT_ABSOLUTE_POSE);
 }
 
-// Mowing areas with mowable: false, from the map. The blade stays off while the mower drives across one, e.g. on
-// the way from one lane to the next. Set from the map callback, read by checkSafety and the spinup check
+// Mowing areas with mowable: false, from the map, each with the mowable ones that lie within it: those are mowed as
+// usual, the inner area counts. The blade stays off while the mower drives across the rest, e.g. on the way from one
+// lane to the next. Set from the map callback, read by checkSafety and the spinup check
+typedef std::vector<std::pair<double, double>> Outline;
+struct NoMowArea {
+  Outline outline;
+  std::vector<Outline> mowed_inside;
+};
 std::mutex no_mow_mutex;
-std::vector<std::vector<std::pair<double, double>>> no_mow_areas;
+std::vector<NoMowArea> no_mow_areas;
+
+bool insideOutline(const Outline& area, double x, double y) {
+  bool inside = false;
+  for (size_t i = 0, j = area.size() - 1; i < area.size(); j = i++) {
+    const auto& [xi, yi] = area[i];
+    const auto& [xj, yj] = area[j];
+    if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// inside or less than 5 cm off the edge, an edge shared with a neighbour is never exactly on it
+bool insideOrOnEdge(const Outline& area, double x, double y) {
+  for (size_t i = 0, j = area.size() - 1; i < area.size(); j = i++) {
+    const auto& [xi, yi] = area[i];
+    const auto& [xj, yj] = area[j];
+    const double dx = xj - xi, dy = yj - yi, len2 = dx * dx + dy * dy;
+    const double t = len2 > 0 ? std::clamp(((x - xi) * dx + (y - yi) * dy) / len2, 0.0, 1.0) : 0.0;
+    if (std::hypot(x - xi - t * dx, y - yi - t * dy) < 0.05) return true;
+  }
+  return insideOutline(area, x, y);
+}
 
 void jsonMapReceived(const std_msgs::String::ConstPtr& msg) {
-  std::vector<std::vector<std::pair<double, double>>> areas;
+  std::vector<Outline> no_mow, mowed;
   try {
     const auto map = nlohmann::json::parse(msg->data);
     for (const auto& area : map.value("areas", nlohmann::json::array())) {
       const auto props = area.value("properties", nlohmann::json::object());
-      if (props.value("type", "") != "mow" || !props.value("active", true) || props.value("mowable", true)) continue;
-      std::vector<std::pair<double, double>> outline;
+      if (props.value("type", "") != "mow" || !props.value("active", true)) continue;
+      Outline outline;
       for (const auto& p : area.value("outline", nlohmann::json::array())) {
         outline.emplace_back(p.value("x", 0.0), p.value("y", 0.0));
       }
-      if (outline.size() >= 3) areas.push_back(outline);
+      if (outline.size() < 3) continue;
+      (props.value("mowable", true) ? mowed : no_mow).push_back(outline);
     }
   } catch (const std::exception& e) {
     ROS_ERROR_STREAM("Can't read the map for the areas that aren't mowed: " << e.what());
     return;
+  }
+  std::vector<NoMowArea> areas;
+  for (const auto& outline : no_mow) {
+    NoMowArea area{outline, {}};
+    for (const auto& m : mowed) {
+      if (std::all_of(m.begin(), m.end(), [&](const auto& p) { return insideOrOnEdge(outline, p.first, p.second); })) {
+        area.mowed_inside.push_back(m);
+      }
+    }
+    areas.push_back(area);
   }
   std::lock_guard<std::mutex> lk{no_mow_mutex};
   no_mow_areas = areas;
@@ -469,13 +508,10 @@ void jsonMapReceived(const std_msgs::String::ConstPtr& msg) {
 bool overNoMowArea(double x, double y) {
   std::lock_guard<std::mutex> lk{no_mow_mutex};
   for (const auto& area : no_mow_areas) {
-    bool inside = false;
-    for (size_t i = 0, j = area.size() - 1; i < area.size(); j = i++) {
-      const auto& [xi, yi] = area[i];
-      const auto& [xj, yj] = area[j];
-      if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-    }
-    if (inside) return true;
+    if (!insideOutline(area.outline, x, y)) continue;
+    const bool mowed = std::any_of(area.mowed_inside.begin(), area.mowed_inside.end(),
+                                   [&](const Outline& m) { return insideOutline(m, x, y); });
+    if (!mowed) return true;
   }
   return false;
 }
