@@ -82,6 +82,9 @@ struct MapArea {
   // false: a mowing area that's still drivable but left out when mowing, like a navigation area (an inactive area
   // is gone for navigation too)
   bool mowable = true;
+  // with mowable false: the mowing areas it lies in plan around it (outline pass, no lanes across). otherwise the
+  // lanes go across it and only the blade stays off
+  bool mow_around = false;
   Polygon outline;
   double angle = std::numeric_limits<double>::quiet_NaN();
   int outline_count = -1;
@@ -127,6 +130,7 @@ void to_json(json& j, const MapArea& data) {
   properties["type"] = data.type;
   if (!data.active) properties["active"] = data.active;
   if (!data.mowable) properties["mowable"] = data.mowable;
+  if (data.mow_around) properties["mow_around"] = data.mow_around;
   if (!std::isnan(data.angle)) properties["angle"] = data.angle;
   if (data.outline_count >= 0) properties["outline_count"] = data.outline_count;
   if (data.outline_overlap_count >= 0) properties["outline_overlap_count"] = data.outline_overlap_count;
@@ -142,6 +146,7 @@ void from_json(const json& j, MapArea& data) {
   data.type = properties.value("type", "draft");
   data.active = properties.value("active", true);
   data.mowable = properties.value("mowable", true);
+  data.mow_around = properties.value("mow_around", false);
   data.angle = properties.value("angle", std::numeric_limits<double>::quiet_NaN());
   data.outline_count = properties.value("outline_count", -1);
   data.outline_overlap_count = properties.value("outline_overlap_count", -1);
@@ -622,12 +627,12 @@ bool getMowingArea(mower_map::GetMowingAreaSrvRequest& req, mower_map::GetMowing
     res.area.obstacles.push_back(internalPolygonToGeometry(area.outline));
   }
 
-  // A mowing area that isn't mowable is left out where it lies within this one, e.g. wildflowers in the lawn.
-  // Otherwise it was mowed along with it. The inner one counts, so this one lying within it is mowed as usual. It
-  // stays drivable, the navigation map doesn't change
+  // A mowing area that isn't mowable and has mow_around is left out where it lies within this one, e.g. a flower
+  // bed in the lawn: an outline pass along it and no lanes across. The inner one counts, so this one lying within it
+  // is mowed as usual. It stays drivable, the navigation map doesn't change
   const auto& requested = mowing_areas[req.index];
   for (const auto& area : map_data.areas) {
-    if (!area.active || area.type != "mow" || area.mowable || area.id == requested.id) continue;
+    if (!area.active || area.type != "mow" || area.mowable || !area.mow_around || area.id == requested.id) continue;
     const bool around = std::all_of(requested.outline.begin(), requested.outline.end(),
                                     [&](const Point& p) { return insideOrOnEdge(area.outline, p); });
     if (around) continue;
