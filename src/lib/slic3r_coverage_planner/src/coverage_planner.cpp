@@ -5,6 +5,7 @@
 #include "ros/ros.h"
 
 #include <boost/range/adaptor/reversed.hpp>
+#include <optional>
 
 #include "ExPolygon.hpp"
 #include "Polyline.hpp"
@@ -324,6 +325,7 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
 // A lane of a cell, in the frame rotated so lanes run along x
 struct CellLane {
     coord_t x0, x1, y;
+    int row;
 };
 
 // A part of the area the lanes cross in one piece, mowed in one zigzag
@@ -332,8 +334,9 @@ struct Cell {
 };
 
 // Lanes along the angle, d apart, in cells. A cell goes on as long as each lane leads to exactly one in the next row
-// and both ends connect inside the area. Where the area splits or joins (an obstacle, a bay) the pair that overlaps
-// most goes on and the rest starts cells of their own, as does a step in the edge.
+// and both ends connect inside the area. Where the area splits (an obstacle, a bay) the part that overlaps most goes
+// on and the rest starts a cell of its own. Where parts join again all of them end, so the parts beside an obstacle
+// can be mowed one after the other before going on below it.
 std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
     std::vector<Cell> cells;
     for (const auto &region: union_ex(inner)) {
@@ -356,6 +359,8 @@ std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
             // the room that's left over goes to both sides equally
             const coord_t y0 = bb.min.y + (h - coord_t(rows - 1) * d) / 2;
             std::vector<int> open;
+            std::vector<std::vector<CellLane>> all_rows;
+            const size_t first_cell = cells.size();
             for (int k = 0; k < rows; k++) {
                 const coord_t y = y0 + coord_t(k) * d;
                 Polyline line;
@@ -364,7 +369,7 @@ std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
                 for (const auto &c: intersection_pl(Polylines{line}, (Polygons) lanes_area)) {
                     coord_t x0 = c.first_point().x, x1 = c.last_point().x;
                     if (x0 > x1) std::swap(x0, x1);
-                    if (x1 - x0 > scale_(0.02)) row.push_back({x0, x1, y});
+                    if (x1 - x0 > scale_(0.02)) row.push_back({x0, x1, y, k});
                 }
                 std::sort(row.begin(), row.end(), [](const CellLane &p, const CellLane &q) { return p.x0 < q.x0; });
 
@@ -373,11 +378,11 @@ std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
                     const CellLane &last = cells[c].lanes.back();
                     for (size_t j = 0; j < row.size(); j++) {
                         if (!overlaps(last, row[j])) continue;
+                        int joining = 0;
+                        for (int other: open) joining += overlaps(cells[other].lanes.back(), row[j]);
+                        if (joining > 1) continue;
                         if (!inside(Point(last.x0, last.y), Point(row[j].x0, row[j].y)) ||
                             !inside(Point(last.x1, last.y), Point(row[j].x1, row[j].y))) continue;
-                        // a lane end far beyond the last one is a step in the edge: the way there would run along the
-                        // new lane and back
-                        if (std::abs(last.x0 - row[j].x0) > 6 * d || std::abs(last.x1 - row[j].x1) > 6 * d) continue;
                         pairs.emplace_back(std::min(last.x1, row[j].x1) - std::max(last.x0, row[j].x0), c, int(j));
                     }
                 }
@@ -401,7 +406,78 @@ std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
                     next.push_back(cell_of[j]);
                 }
                 open = next;
+                all_rows.push_back(row);
             }
+
+            // The rows are a fixed grid, an edge along the lanes can leave up to half a lane between the round and the
+            // first or last lane of a cell. Where such a strip is long (at a slanted edge the lane ends and
+            // connectors cover it), an extra lane half a row further out mows just that stretch
+            const auto extra = [&](const CellLane &lane, int dir) -> std::optional<CellLane> {
+                std::vector<std::pair<coord_t, coord_t>> strip;
+                Polyline probe;
+                probe.points = {Point(lane.x0 - d, lane.y + dir * d * 3 / 4), Point(lane.x1 + d, lane.y + dir * d * 3 / 4)};
+                for (const auto &c: intersection_pl(Polylines{probe}, (Polygons) lanes_area)) {
+                    coord_t x0 = c.first_point().x, x1 = c.last_point().x;
+                    if (x0 > x1) std::swap(x0, x1);
+                    strip.push_back({x0, x1});
+                }
+                // the next row covers its part anyway
+                const int next_row = lane.row + dir;
+                if (lane.row >= 0 && next_row >= 0 && next_row < int(all_rows.size())) {
+                    for (const auto &other: all_rows[next_row]) {
+                        std::vector<std::pair<coord_t, coord_t>> rest;
+                        for (const auto &[x0, x1]: strip) {
+                            if (other.x1 <= x0 || other.x0 >= x1) {
+                                rest.push_back({x0, x1});
+                                continue;
+                            }
+                            if (other.x0 > x0) rest.push_back({x0, other.x0});
+                            if (other.x1 < x1) rest.push_back({other.x1, x1});
+                        }
+                        strip = rest;
+                    }
+                }
+                coord_t length = 0, from = 0, to = 0;
+                for (const auto &[x0, x1]: strip) {
+                    if (length == 0 || x0 < from) from = x0;
+                    if (length == 0 || x1 > to) to = x1;
+                    length += x1 - x0;
+                }
+                if (length < std::max<coord_t>(scale_(0.5), (lane.x1 - lane.x0) * 3 / 10)) return std::nullopt;
+                const coord_t y = lane.y + dir * d / 2;
+                Polyline line;
+                line.points = {Point(from - d / 2, y), Point(to + d / 2, y)};
+                std::optional<CellLane> best;
+                for (const auto &c: intersection_pl(Polylines{line}, (Polygons) lanes_area)) {
+                    coord_t x0 = c.first_point().x, x1 = c.last_point().x;
+                    if (x0 > x1) std::swap(x0, x1);
+                    if (x1 - x0 > scale_(0.02) && (!best || x1 - x0 > best->x1 - best->x0)) best = CellLane{x0, x1, y, -1};
+                }
+                return best;
+            };
+            // cells of their own are added after the loop, adding to cells here would move the lanes being changed
+            std::vector<Cell> single;
+            const size_t last_cell = cells.size();
+            for (size_t c = first_cell; c < last_cell; c++) {
+                auto &lanes = cells[c].lanes;
+                if (auto lane = extra(lanes.front(), -1)) {
+                    if (inside(Point(lane->x0, lane->y), Point(lanes.front().x0, lanes.front().y)) &&
+                        inside(Point(lane->x1, lane->y), Point(lanes.front().x1, lanes.front().y))) {
+                        lanes.insert(lanes.begin(), *lane);
+                    } else {
+                        single.push_back({{*lane}});
+                    }
+                }
+                if (auto lane = extra(lanes.back(), 1)) {
+                    if (inside(Point(lanes.back().x0, lanes.back().y), Point(lane->x0, lane->y)) &&
+                        inside(Point(lanes.back().x1, lanes.back().y), Point(lane->x1, lane->y))) {
+                        lanes.push_back(*lane);
+                    } else {
+                        single.push_back({{*lane}});
+                    }
+                }
+            }
+            cells.insert(cells.end(), single.begin(), single.end());
         }
     }
     return cells;
@@ -468,13 +544,16 @@ void appendCells(slic3r_coverage_planner::PlanPathResponse &res, std_msgs::Heade
     const auto dist = [](const geometry_msgs::PoseStamped &a, const geometry_msgs::PoseStamped &b) {
         return std::hypot(a.pose.position.x - b.pose.position.x, a.pose.position.y - b.pose.position.y);
     };
+    // without outer rounds the first item can start anywhere
+    const bool free_start = res.paths.empty();
     const geometry_msgs::PoseStamped start =
-            res.paths.empty() ? items.front().front().path.poses.front() : res.paths.back().path.poses.back();
+            free_start ? items.front().front().path.poses.front() : res.paths.back().path.poses.back();
     const auto cost = [&](const std::vector<std::pair<int, int>> &order) {
         geometry_msgs::PoseStamped pos = start;
         double c = 0;
-        for (const auto &[i, v]: order) {
-            c += dist(pos, items[i][v].path.poses.front());
+        for (size_t n = 0; n < order.size(); n++) {
+            const auto &[i, v] = order[n];
+            if (n > 0 || !free_start) c += dist(pos, items[i][v].path.poses.front());
             pos = items[i][v].path.poses.back();
         }
         return c;
