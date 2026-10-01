@@ -632,15 +632,12 @@ void appendCells(slic3r_coverage_planner::PlanPathResponse &res, std_msgs::Heade
     const bool free_start = res.paths.empty();
     const geometry_msgs::PoseStamped start =
             free_start ? items.front().front().path.poses.front() : res.paths.back().path.poses.back();
-    const auto cost = [&](const std::vector<std::pair<int, int>> &order) {
-        geometry_msgs::PoseStamped pos = start;
-        double c = 0;
-        for (size_t n = 0; n < order.size(); n++) {
-            const auto &[i, v] = order[n];
-            if (n > 0 || !free_start) c += dist(pos, items[i][v].path.poses.front());
-            pos = items[i][v].path.poses.back();
-        }
-        return c;
+    // driving from the end of prev (nullptr: the start) to the beginning of next (nullptr: nothing follows)
+    const auto link = [&](const std::pair<int, int> *prev, const std::pair<int, int> *next) {
+        if (!next) return 0.0;
+        const auto &to = items[next->first][next->second].path.poses.front();
+        if (!prev) return free_start ? 0.0 : dist(start, to);
+        return dist(items[prev->first][prev->second].path.poses.back(), to);
     };
 
     // nearest first, then move single items to another place or corner as long as that saves driving
@@ -665,19 +662,24 @@ void appendCells(slic3r_coverage_planner::PlanPathResponse &res, std_msgs::Heade
         order.push_back({bi, bv});
         pos = items[bi][bv].path.poses.back();
     }
+    // only the links around the old and the new place change
     for (bool improved = true; improved;) {
         improved = false;
-        const double current = cost(order);
         for (size_t a = 0; a < order.size() && !improved; a++) {
+            const auto *prev = a > 0 ? &order[a - 1] : nullptr;
+            const auto *next = a + 1 < order.size() ? &order[a + 1] : nullptr;
+            const double removed = link(prev, &order[a]) + link(&order[a], next) - link(prev, next);
             auto rest = order;
             const int item = rest[a].first;
             rest.erase(rest.begin() + a);
             for (size_t b = 0; b <= rest.size() && !improved; b++) {
+                const auto *before = b > 0 ? &rest[b - 1] : nullptr;
+                const auto *after = b < rest.size() ? &rest[b] : nullptr;
                 for (size_t v = 0; v < items[item].size() && !improved; v++) {
-                    auto candidate = rest;
-                    candidate.insert(candidate.begin() + b, {item, int(v)});
-                    if (cost(candidate) < current - 1e-6) {
-                        order = candidate;
+                    const std::pair<int, int> moved{item, int(v)};
+                    if (link(before, &moved) + link(&moved, after) - link(before, after) - removed < -1e-6) {
+                        rest.insert(rest.begin() + b, moved);
+                        order = rest;
                         improved = true;
                     }
                 }
