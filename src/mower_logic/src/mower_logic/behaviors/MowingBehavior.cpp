@@ -45,6 +45,7 @@ extern mower_logic::MowerLogicConfig getConfig();
 extern void setConfig(mower_logic::MowerLogicConfig);
 
 extern void registerActions(std::string prefix, const std::vector<xbot_msgs::ActionInfo>& actions);
+extern bool overNoMowArea();
 extern void setEmergencyMode(uint16_t reason);
 
 extern StateSubscriber<mower_msgs::Status> status_state_subscriber;
@@ -354,6 +355,9 @@ std::vector<std::string> getConfiguredRecoveryBehaviors() {
 bool MowingBehavior::wait_for_mower_spinup() {
   if (config.mower_spinup_rpm <= 0) {
     return true;  // spinup check disabled
+  }
+  if (overNoMowArea()) {
+    return true;  // the blade stays off over an area that isn't mowed
   }
 
   ROS_INFO_STREAM("MowingBehavior: (MOW) Waiting for mower motor to reach " << config.mower_spinup_rpm

@@ -440,6 +440,52 @@ bool isGpsGood() {
          (last_pose.flags & xbot_msgs::AbsolutePose::FLAG_SENSOR_FUSION_RECENT_ABSOLUTE_POSE);
 }
 
+// Mowing areas with mowable: false, from the map. The blade stays off while the mower drives across one, e.g. on
+// the way from one lane to the next. Set from the map callback, read by checkSafety and the spinup check
+std::mutex no_mow_mutex;
+std::vector<std::vector<std::pair<double, double>>> no_mow_areas;
+
+void jsonMapReceived(const std_msgs::String::ConstPtr& msg) {
+  std::vector<std::vector<std::pair<double, double>>> areas;
+  try {
+    const auto map = nlohmann::json::parse(msg->data);
+    for (const auto& area : map.value("areas", nlohmann::json::array())) {
+      const auto props = area.value("properties", nlohmann::json::object());
+      if (props.value("type", "") != "mow" || !props.value("active", true) || props.value("mowable", true)) continue;
+      std::vector<std::pair<double, double>> outline;
+      for (const auto& p : area.value("outline", nlohmann::json::array())) {
+        outline.emplace_back(p.value("x", 0.0), p.value("y", 0.0));
+      }
+      if (outline.size() >= 3) areas.push_back(outline);
+    }
+  } catch (const std::exception& e) {
+    ROS_ERROR_STREAM("Can't read the map for the areas that aren't mowed: " << e.what());
+    return;
+  }
+  std::lock_guard<std::mutex> lk{no_mow_mutex};
+  no_mow_areas = areas;
+}
+
+bool overNoMowArea(double x, double y) {
+  std::lock_guard<std::mutex> lk{no_mow_mutex};
+  for (const auto& area : no_mow_areas) {
+    bool inside = false;
+    for (size_t i = 0, j = area.size() - 1; i < area.size(); j = i++) {
+      const auto& [xi, yi] = area[i];
+      const auto& [xj, yj] = area[j];
+      if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    if (inside) return true;
+  }
+  return false;
+}
+
+// whether the mower is over an area that isn't mowed right now, the spinup check doesn't wait for the blade then
+bool overNoMowArea() {
+  const auto pose = pose_state_subscriber.getMessage();
+  return overNoMowArea(pose.pose.pose.position.x, pose.pose.pose.position.y);
+}
+
 /// @brief Called every 0.5s, used to control BLADE motor via mower_enabled variable and stop any movement in case of
 /// /odom and /mower/status outages
 /// @param timer_event
@@ -565,8 +611,16 @@ void checkSafety(const ros::TimerEvent& timer_event) {
     }
   }
 
+  // over an area that isn't mowed the blade goes off right away, and on again after two checks (1 s) outside, so it
+  // doesn't flicker at the edge
+  static int no_mow_checks = 0;
+  no_mow_checks = overNoMowArea(last_pose.pose.pose.position.x, last_pose.pose.pose.position.y)
+                      ? 2
+                      : std::max(no_mow_checks - 1, 0);
+  const bool over_no_mow = no_mow_checks > 0;
+
   // enable the mower (if not aleady) if mowerAllowed is still true after checks and bahavior agrees
-  setMowerEnabled(currentBehavior != nullptr && mowerAllowed && currentBehavior->mower_enabled());
+  setMowerEnabled(currentBehavior != nullptr && mowerAllowed && currentBehavior->mower_enabled() && !over_no_mow);
 
   // Get BMS voltage if available, otherwise use ADC or charger voltage
   const auto last_bms = bms_state_subscriber.getMessage();
@@ -903,6 +957,7 @@ int main(int argc, char** argv) {
 
   pathClient = n->serviceClient<slic3r_coverage_planner::PlanPath>("slic3r_coverage_planner/plan_path");
   mapClient = n->serviceClient<mower_map::GetMowingAreaSrv>("mower_map_service/get_mowing_area");
+  ros::Subscriber json_map_sub = n->subscribe("mower_map_service/json_map", 1, jsonMapReceived);
   clearMapClient = n->serviceClient<mower_map::ClearMapSrv>("mower_map_service/clear_map");
 
   gpsClient = n->serviceClient<xbot_positioning::GPSControlSrv>("xbot_positioning/set_gps_state");
