@@ -333,8 +333,9 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         for (auto &pt: hole.points) {
             hole_poly.points.push_back(Point(scale_(pt.x), scale_(pt.y)));
         }
-        hole_poly.make_counter_clockwise();
-        obstacles.push_back(hole_poly);
+        // A recording that crosses itself is resolved on its own first, a part of it running the other way round
+        // would cancel out another obstacle where the two overlap
+        append_to(obstacles, union_(Polygons{hole_poly}));
     }
 
     // The obstacles are cut out of the outline in one go instead of being used as holes as they are. Holes that
@@ -390,7 +391,8 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
                 offsets = diff(
                         offset(last, -outer_distance, CLIPPER_OFFSET_SCALE, ClipperLib::jtRound,
                                scale_(0.001) * CLIPPER_OFFSET_SCALE),
-                        offset(obstacles, outer_distance)
+                        offset(obstacles, outer_distance, CLIPPER_OFFSET_SCALE, ClipperLib::jtRound,
+                               scale_(0.001) * CLIPPER_OFFSET_SCALE)
                 );
             } else if (i == 0) {
                 offsets = offset(
