@@ -221,9 +221,6 @@ void traverse_from_right(std::vector<PerimeterGeneratorLoop> &contours, std::vec
 // Points at most 10 cm apart that keep the corners. Equally spaced points cut them, the straight line between two of
 // them left the area a little at an inner corner and stopped short of the end of a lane. Wiggles smaller than
 // tolerance are left out, a round along a recorded edge would follow every bit of gps noise, slow down and turn
-#ifndef ROUND_TOLERANCE
-#define ROUND_TOLERANCE 0.03
-#endif
 Points spacedPoints(Polyline line, double tolerance) {
     line.remove_duplicate_points();
     line.simplify(scale_(tolerance));
@@ -247,7 +244,7 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
     Point lastPoint;
     bool is_first_point = true;
     for (int i = 0; i < group.size(); i++) {
-        auto points = spacedPoints(group[i].split_at_first_point(), ROUND_TOLERANCE);
+        auto points = spacedPoints(group[i].split_at_first_point(), 0.03);
         if (points.size() < 2) {
             ROS_INFO("Skipping single dot");
             continue;
