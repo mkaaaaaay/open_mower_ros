@@ -5,6 +5,7 @@
 #include "ros/ros.h"
 
 #include <boost/range/adaptor/reversed.hpp>
+#include <map>
 #include <optional>
 
 #include "ExPolygon.hpp"
@@ -339,11 +340,28 @@ struct Cell {
 // and both ends connect inside the area. Where the area splits (an obstacle, a bay) the part that overlaps most goes
 // on and the rest starts a cell of its own. Where parts join again all of them end, so the parts beside an obstacle
 // can be mowed one after the other before going on below it.
-std::vector<Cell> buildCells(const ExPolygons &area, const Polygons &inner, double angle, coord_t d) {
+std::vector<Cell> buildCells(const ExPolygons &area, const Polygons &inner, const Polygons &rounds, double angle,
+                             coord_t d, coord_t keep) {
     // nothing may leave the area or run into an obstacle, whatever the rounds are
     ExPolygons bounds = area;
     for (auto &b: bounds) {
         b.rotate(-angle);
+    }
+    // what the rounds mow, on a grid of 1 m squares
+    const coord_t square = scale_(1.0);
+    const auto square_of = [&](coord_t x, coord_t y) {
+        return std::make_pair((long) std::floor(double(x) / square), (long) std::floor(double(y) / square));
+    };
+    std::map<std::pair<long, long>, Lines> round_lines;
+    for (Polygon round: rounds) {
+        round.rotate(-angle);
+        for (const Line &line: round.lines()) {
+            const auto [x0, y0] = square_of(std::min(line.a.x, line.b.x), std::min(line.a.y, line.b.y));
+            const auto [x1, y1] = square_of(std::max(line.a.x, line.b.x), std::max(line.a.y, line.b.y));
+            for (long x = x0; x <= x1; x++) {
+                for (long y = y0; y <= y1; y++) round_lines[{x, y}].push_back(line);
+            }
+        }
     }
     std::vector<Cell> cells;
     for (const auto &region: union_ex(inner)) {
@@ -511,14 +529,27 @@ std::vector<Cell> buildCells(const ExPolygons &area, const Polygons &inner, doub
             cells.insert(cells.end(), single.begin(), single.end());
 
             // An edge nearly along the lanes leaves long thin wedges between the lane ends, on each side only every
-            // other pair of lanes is connected. Where more than 30 cm of such an edge stays uncovered, a run along the
-            // edge mows it, the wedges reach at most half a lane inwards
+            // other pair of lanes is connected, and without rounds a strip between the edge and the lane next to it.
+            // That is checked at the edge (as far in as the outline offset keeps free) and just inside the lane area,
+            // against the lanes and the rounds, a run along the edge mows what stays open. Runs less than a metre apart are joined, mowing that bit on the way
+            // costs less than driving there twice
             std::vector<CellLane> all_lanes;
             for (size_t c = first_cell; c < cells.size(); c++) {
                 all_lanes.insert(all_lanes.end(), cells[c].lanes.begin(), cells[c].lanes.end());
             }
             const double reach = d / 2.0 + scale_(0.02);
             const auto covered = [&](double x, double y) {
+                const Point p((coord_t) x, (coord_t) y);
+                const auto [sx, sy] = square_of(p.x, p.y);
+                for (long ix = sx - 1; ix <= sx + 1; ix++) {
+                    for (long iy = sy - 1; iy <= sy + 1; iy++) {
+                        const auto it = round_lines.find({ix, iy});
+                        if (it == round_lines.end()) continue;
+                        for (const Line &line: it->second) {
+                            if (p.distance_to(line) <= reach) return true;
+                        }
+                    }
+                }
                 for (const auto &lane: all_lanes) {
                     const double cx = std::clamp(x, double(lane.x0), double(lane.x1));
                     if (std::hypot(x - cx, y - lane.y) <= reach) return true;
@@ -526,28 +557,41 @@ std::vector<Cell> buildCells(const ExPolygons &area, const Polygons &inner, doub
                 return false;
             };
             const double shallow = std::tan(12.0 * M_PI / 180.0);
+            const double to_edge = std::max(0.0, d / 2.0 - keep), step_in = scale_(0.03), max_gap = scale_(1.0);
             for (const Polygon &ring: lanes_area.simplify_p(scale_(0.03))) {
                 const size_t n = ring.points.size();
                 Polyline run;
+                Points gap_points;
+                double gap = 0;
                 const auto finish = [&]() {
                     if (run.points.size() >= 2 && run.length() >= scale_(0.3)) cells.push_back({{}, run});
                     run.points.clear();
+                    gap_points.clear();
+                    gap = 0;
                 };
                 for (size_t i = 0; i < n; i++) {
                     const Point &a = ring.points[i], &b = ring.points[(i + 1) % n];
-                    const double dx = b.x - a.x, dy = b.y - a.y;
-                    if (std::abs(dy) > std::abs(dx) * shallow) {
-                        finish();
-                        continue;
-                    }
-                    const int steps = std::max(1, int(std::hypot(dx, dy) / scale_(0.05)));
-                    for (int k = 0; k <= steps; k++) {
+                    const double dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
+                    if (len <= 0) continue;
+                    // outwards is to the right, contours run counter-clockwise and holes clockwise
+                    const double nx = dy / len, ny = -dx / len;
+                    const bool along = std::abs(dy) <= std::abs(dx) * shallow;
+                    const int steps = std::max(1, int(len / scale_(0.05)));
+                    for (int k = 0; k < steps; k++) {
                         const double x = a.x + dx * k / steps, y = a.y + dy * k / steps;
-                        if (covered(x, y)) {
-                            finish();
+                        const Point p((coord_t) x, (coord_t) y);
+                        const bool open = along && !(covered(x + nx * to_edge, y + ny * to_edge) &&
+                                                     covered(x - nx * step_in, y - ny * step_in));
+                        if (!open) {
+                            if (run.points.empty()) continue;
+                            gap_points.push_back(p);
+                            gap += len / steps;
+                            if (gap > max_gap) finish();
                             continue;
                         }
-                        const Point p((coord_t) x, (coord_t) y);
+                        run.points.insert(run.points.end(), gap_points.begin(), gap_points.end());
+                        gap_points.clear();
+                        gap = 0;
                         if (run.points.empty() || !run.points.back().coincides_with(p)) run.points.push_back(p);
                     }
                 }
@@ -865,7 +909,12 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
     std::vector<Cell> cells;
     if (!req.skip_fill && cell_fill) {
-        cells = buildCells(area, inner, req.angle, scale_(req.distance));
+        // the rounds that get driven, the wedges they mow need no run of their own
+        Polygons rounds;
+        for (const auto &group: area_outlines) append_to(rounds, group);
+        for (const auto &group: obstacle_outlines) append_to(rounds, group);
+        cells = buildCells(area, inner, rounds, req.angle, scale_(req.distance),
+                           scale_(std::max(0.0, double(req.outer_offset)) + 0.01));
     } else if (!req.skip_fill) {
         ExPolygons expp = union_ex(inner);
 
