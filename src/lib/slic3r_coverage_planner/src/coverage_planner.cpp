@@ -328,9 +328,11 @@ struct CellLane {
     int row;
 };
 
-// A part of the area the lanes cross in one piece, mowed in one zigzag
+// A part of the area the lanes cross in one piece, mowed in one zigzag. Or a part too narrow for lanes, mowed
+// along its middle (path)
 struct Cell {
     std::vector<CellLane> lanes;
+    Polyline path;
 };
 
 // Lanes along the angle, d apart, in cells. A cell goes on as long as each lane leads to exactly one in the next row
@@ -352,7 +354,31 @@ std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
         };
         const auto overlaps = [](const CellLane &p, const CellLane &q) { return p.x0 < q.x1 && q.x0 < p.x1; };
         // the lane centres keep half a lane from the innermost round, like the slic3r fill
-        for (const auto &lanes_area: offset_ex(ExPolygons{r}, -float(d) / 2)) {
+        const ExPolygons centres = offset_ex(ExPolygons{r}, -float(d) / 2);
+        // lanes only where it's at least a lane wide, a narrower part (between rounds, a corridor) is mowed along its
+        // middle. Bits under 30 cm are corners the lanes reach anyway
+        const ExPolygons wide = offset_ex(offset_ex(centres, -float(d) / 2), float(d) / 2);
+        for (const auto &narrow: offset_ex(diff_ex(centres, wide), -float(scale_(0.01)))) {
+            Polylines middle;
+            offset_ex(ExPolygons{narrow}, float(scale_(0.01))).front().medial_axis(2.0 * d, 0, &middle);
+            for (auto &line: middle) {
+                line.simplify(scale_(0.02));
+                if (line.length() >= scale_(0.3)) cells.push_back({{}, line});
+            }
+        }
+        for (const auto &lanes_area: wide) {
+            // A long connector is fine along the edge (a slanted edge), not through the middle: there it would cut
+            // across the lanes, that's where the edge has a step and a new cell starts
+            const ExPolygons edge = diff_ex(offset_ex(ExPolygons{lanes_area}, float(d) / 4),
+                                            offset_ex(ExPolygons{lanes_area}, -float(d)));
+            const auto connects = [&](const Point &p, const Point &q) {
+                if (!inside(p, q)) return false;
+                if (p.distance_to(q) <= 2 * d) return true;
+                for (const auto &e: edge) {
+                    if (e.contains(Line(p, q))) return true;
+                }
+                return false;
+            };
             const BoundingBox bb = lanes_area.bounding_box();
             const coord_t h = bb.max.y - bb.min.y;
             const int rows = h / d + 1;
@@ -381,8 +407,8 @@ std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
                         int joining = 0;
                         for (int other: open) joining += overlaps(cells[other].lanes.back(), row[j]);
                         if (joining > 1) continue;
-                        if (!inside(Point(last.x0, last.y), Point(row[j].x0, row[j].y)) ||
-                            !inside(Point(last.x1, last.y), Point(row[j].x1, row[j].y))) continue;
+                        if (!connects(Point(last.x0, last.y), Point(row[j].x0, row[j].y)) ||
+                            !connects(Point(last.x1, last.y), Point(row[j].x1, row[j].y))) continue;
                         pairs.emplace_back(std::min(last.x1, row[j].x1) - std::max(last.x0, row[j].x0), c, int(j));
                     }
                 }
@@ -522,6 +548,15 @@ void appendCells(slic3r_coverage_planner::PlanPathResponse &res, std_msgs::Heade
     }
     for (const auto &cell: cells) {
         std::vector<slic3r_coverage_planner::Path> variants;
+        if (!cell.path.points.empty()) {
+            Polyline line = cell.path;
+            line.rotate(angle);
+            variants.push_back(linePath(header, line, false));
+            line.reverse();
+            variants.push_back(linePath(header, line, false));
+            if (!variants.front().path.poses.empty()) items.push_back(variants);
+            continue;
+        }
         for (int left = 0; left < 2; left++) {
             Polyline zigzag;
             for (size_t k = 0; k < cell.lanes.size(); k++) {
