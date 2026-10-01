@@ -339,13 +339,16 @@ struct Cell {
 // and both ends connect inside the area. Where the area splits (an obstacle, a bay) the part that overlaps most goes
 // on and the rest starts a cell of its own. Where parts join again all of them end, so the parts beside an obstacle
 // can be mowed one after the other before going on below it.
-std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
+std::vector<Cell> buildCells(const ExPolygon &area, const Polygons &inner, double angle, coord_t d) {
+    // nothing may leave the area or run into an obstacle, whatever the rounds are
+    ExPolygon bounds = area;
+    bounds.rotate(-angle);
     std::vector<Cell> cells;
     for (const auto &region: union_ex(inner)) {
         ExPolygon r = region;
         r.rotate(-angle);
         // connectors between two lanes may use the half lane next to the innermost round
-        const ExPolygons connector_area = offset_ex(ExPolygons{r}, float(d) / 4);
+        const ExPolygons connector_area = intersection_ex(offset_ex(ExPolygons{r}, float(d) / 4), ExPolygons{bounds});
         const auto inside = [&](const Point &p, const Point &q) {
             for (const auto &ca: connector_area) {
                 if (ca.contains(Line(p, q))) return true;
@@ -504,6 +507,50 @@ std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
                 }
             }
             cells.insert(cells.end(), single.begin(), single.end());
+
+            // An edge nearly along the lanes leaves long thin wedges between the lane ends, on each side only every
+            // other pair of lanes is connected. Where more than 30 cm of such an edge stays uncovered, a run along the
+            // edge mows it, the wedges reach at most half a lane inwards
+            std::vector<CellLane> all_lanes;
+            for (size_t c = first_cell; c < cells.size(); c++) {
+                all_lanes.insert(all_lanes.end(), cells[c].lanes.begin(), cells[c].lanes.end());
+            }
+            const double reach = d / 2.0 + scale_(0.02);
+            const auto covered = [&](double x, double y) {
+                for (const auto &lane: all_lanes) {
+                    const double cx = std::clamp(x, double(lane.x0), double(lane.x1));
+                    if (std::hypot(x - cx, y - lane.y) <= reach) return true;
+                }
+                return false;
+            };
+            const double shallow = std::tan(12.0 * M_PI / 180.0);
+            for (const Polygon &ring: lanes_area.simplify_p(scale_(0.03))) {
+                const size_t n = ring.points.size();
+                Polyline run;
+                const auto finish = [&]() {
+                    if (run.points.size() >= 2 && run.length() >= scale_(0.3)) cells.push_back({{}, run});
+                    run.points.clear();
+                };
+                for (size_t i = 0; i < n; i++) {
+                    const Point &a = ring.points[i], &b = ring.points[(i + 1) % n];
+                    const double dx = b.x - a.x, dy = b.y - a.y;
+                    if (std::abs(dy) > std::abs(dx) * shallow) {
+                        finish();
+                        continue;
+                    }
+                    const int steps = std::max(1, int(std::hypot(dx, dy) / scale_(0.05)));
+                    for (int k = 0; k <= steps; k++) {
+                        const double x = a.x + dx * k / steps, y = a.y + dy * k / steps;
+                        if (covered(x, y)) {
+                            finish();
+                            continue;
+                        }
+                        const Point p((coord_t) x, (coord_t) y);
+                        if (run.points.empty() || !run.points.back().coincides_with(p)) run.points.push_back(p);
+                    }
+                }
+                finish();
+            }
         }
     }
     return cells;
@@ -650,6 +697,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     // This ExPolygon contains our input area with holes.
     Slic3r::ExPolygon expoly(outline_poly);
 
+    Polygons holes;
     for (auto &hole: req.holes) {
         Slic3r::Polygon hole_poly;
         for (auto &pt: hole.points) {
@@ -664,9 +712,15 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         // That makes the planner fill inside the obstacle instead of inside the area.
         Polygons clipped_holes = intersection(outline_poly, hole_poly);
         for (auto &clipped_hole: clipped_holes) {
-            clipped_hole.make_clockwise();
-            expoly.holes.push_back(clipped_hole);
+            clipped_hole.make_counter_clockwise();
+            holes.push_back(clipped_hole);
         }
+    }
+    // Obstacles that overlap are merged first. As separate holes their overlap cancelled out and was planned as lawn,
+    // the mower was sent into the obstacles there. A patch enclosed by obstacles can't be reached and is left out
+    for (auto &merged: union_ex(holes)) {
+        merged.contour.make_clockwise();
+        expoly.holes.push_back(merged.contour);
     }
 
 
@@ -803,7 +857,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
     std::vector<Cell> cells;
     if (!req.skip_fill && cell_fill) {
-        cells = buildCells(inner, req.angle, scale_(req.distance));
+        cells = buildCells(expoly, inner, req.angle, scale_(req.distance));
     } else if (!req.skip_fill) {
         ExPolygons expp = union_ex(inner);
 
