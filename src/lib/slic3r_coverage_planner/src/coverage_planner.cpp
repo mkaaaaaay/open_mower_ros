@@ -327,34 +327,27 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
     outline_poly.make_counter_clockwise();
 
-    // This ExPolygon contains our input area with holes.
-    Slic3r::ExPolygon expoly(outline_poly);
-
-    Polygons holes;
+    Polygons obstacles;
     for (auto &hole: req.holes) {
         Slic3r::Polygon hole_poly;
         for (auto &pt: hole.points) {
             hole_poly.points.push_back(Point(scale_(pt.x), scale_(pt.y)));
         }
-        hole_poly.make_clockwise();
+        hole_poly.make_counter_clockwise();
+        obstacles.push_back(hole_poly);
+    }
 
-        // Clip the hole to the outline instead of using it as-is. An obstacle that only
-        // partially overlaps the area (or extends beyond it) can otherwise own the extreme
-        // vertex of the whole path set, which makes Clipper's offset engine (ClipperOffset::
-        // FixOrientations) flip the orientation of every path, including the outline itself.
-        // That makes the planner fill inside the obstacle instead of inside the area.
-        Polygons clipped_holes = intersection(outline_poly, hole_poly);
-        for (auto &clipped_hole: clipped_holes) {
-            clipped_hole.make_counter_clockwise();
-            holes.push_back(clipped_hole);
-        }
+    // The obstacles are cut out of the outline in one go instead of being used as holes as they are. Holes that
+    // overlap cancelled out, the overlap was planned as lawn and the mower sent into the obstacles there. A hole sticking
+    // out of the area could flip the orientation of every path in Clipper's offset engine (ClipperOffset::
+    // FixOrientations), and clipped to the outline it left a hairline along the edge that the outer round followed into
+    // the obstacle. A patch enclosed by obstacles can't be reached and is left out.
+    Polygons merged_obstacles;
+    for (auto &merged: union_ex(obstacles)) {
+        merged_obstacles.push_back(merged.contour);
     }
-    // Obstacles that overlap are merged first. As separate holes their overlap cancelled out and was planned as lawn,
-    // the mower was sent into the obstacles there. A patch enclosed by obstacles can't be reached and is left out
-    for (auto &merged: union_ex(holes)) {
-        merged.contour.make_clockwise();
-        expoly.holes.push_back(merged.contour);
-    }
+    // This contains our input area without the obstacles
+    const ExPolygons area = diff_ex(Polygons{outline_poly}, merged_obstacles);
 
 
 
@@ -380,7 +373,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
     Polygons gaps;
 
-    Polygons last = expoly;
+    Polygons last = to_polygons(area);
     Polygons inner = last;
     if (loop_number >= 0) {  // no loops = -1
 
@@ -390,7 +383,16 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         for (int i = 0; i <= loop_number; ++i) {  // outer loop is 0
             Polygons offsets;
 
-            if (i == 0) {
+            if (i == 0 && outer_distance < 0) {
+                // A negative offset enlarges the area and shrinks the obstacles, by that much and not more. So the corners
+                // are rounded, mitred ones stuck out up to three times as far. And where an obstacle sticks out over the
+                // edge a gap would open between the two, the outer round drove right through the obstacle there
+                offsets = diff(
+                        offset(last, -outer_distance, CLIPPER_OFFSET_SCALE, ClipperLib::jtRound,
+                               scale_(0.001) * CLIPPER_OFFSET_SCALE),
+                        offset(obstacles, outer_distance)
+                );
+            } else if (i == 0) {
                 offsets = offset(
                         last,
                         -outer_distance
