@@ -216,6 +216,23 @@ void traverse_from_right(std::vector<PerimeterGeneratorLoop> &contours, std::vec
     }
 }
 
+// Points at most 10 cm apart that keep the corners. Equally spaced points cut them, the straight line between two of
+// them left the area a little at an inner corner and stopped short of the end of a lane
+Points spacedPoints(Polyline line) {
+    line.remove_duplicate_points();
+    line.simplify(scale_(0.005));
+    Points points;
+    for (size_t i = 0; i + 1 < line.points.size(); i++) {
+        const Point &a = line.points[i], &b = line.points[i + 1];
+        const int n = std::max(1, (int) std::ceil(a.distance_to(b) / scale_(0.1)));
+        for (int k = 0; k < n; k++) {
+            points.push_back(Point(a.x + (b.x - a.x) * k / n, a.y + (b.y - a.y) * k / n));
+        }
+    }
+    if (!line.points.empty()) points.push_back(line.points.back());
+    return points;
+}
+
 slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, Slic3r::Polygon &outline_poly, Slic3r::Polygons &group, bool isObstacle, Point *areaLastPoint) {
     slic3r_coverage_planner::Path path;
     path.is_outline = true;
@@ -224,7 +241,7 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
     Point lastPoint;
     bool is_first_point = true;
     for (int i = 0; i < group.size(); i++) {
-        auto points = group[i].equally_spaced_points(scale_(0.1));
+        auto points = spacedPoints(group[i].split_at_first_point());
         if (points.size() < 2) {
             ROS_INFO("Skipping single dot");
             continue;
@@ -602,13 +619,12 @@ std::vector<Cell> buildCells(const ExPolygons &area, const Polygons &inner, cons
     return cells;
 }
 
-// Poses every 10 cm along the line, each pointing to the next
-slic3r_coverage_planner::Path linePath(std_msgs::Header &header, Polyline line, bool is_outline) {
+// Poses at most 10 cm apart along the line, each pointing to the next
+slic3r_coverage_planner::Path linePath(std_msgs::Header &header, const Polyline &line, bool is_outline) {
     slic3r_coverage_planner::Path path;
     path.is_outline = is_outline;
     path.path.header = header;
-    line.remove_duplicate_points();
-    auto points = line.equally_spaced_points(scale_(0.1));
+    auto points = spacedPoints(line);
     if (points.size() < 2) return path;
     for (size_t k = 0; k < points.size(); k++) {
         geometry_msgs::PoseStamped pose;
