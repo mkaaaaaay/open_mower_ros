@@ -25,6 +25,9 @@
 
 
 bool visualize_plan;
+// Fill the area cell by cell, each in one zigzag, and mow the cells and the rounds around obstacles in the order with
+// the least driving in between, instead of the slic3r fill order
+bool cell_fill;
 ros::Publisher marker_array_publisher;
 
 
@@ -318,6 +321,209 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
     return path;
 }
 
+// A lane of a cell, in the frame rotated so lanes run along x
+struct CellLane {
+    coord_t x0, x1, y;
+};
+
+// A part of the area the lanes cross in one piece, mowed in one zigzag
+struct Cell {
+    std::vector<CellLane> lanes;
+};
+
+// Lanes along the angle, d apart, in cells. A cell goes on as long as each lane leads to exactly one in the next row
+// and both ends connect inside the area. Where the area splits or joins (an obstacle, a bay) the pair that overlaps
+// most goes on and the rest starts cells of their own, as does a step in the edge.
+std::vector<Cell> buildCells(const Polygons &inner, double angle, coord_t d) {
+    std::vector<Cell> cells;
+    for (const auto &region: union_ex(inner)) {
+        ExPolygon r = region;
+        r.rotate(-angle);
+        // connectors between two lanes may use the half lane next to the innermost round
+        const ExPolygons connector_area = offset_ex(ExPolygons{r}, float(d) / 4);
+        const auto inside = [&](const Point &p, const Point &q) {
+            for (const auto &ca: connector_area) {
+                if (ca.contains(Line(p, q))) return true;
+            }
+            return false;
+        };
+        const auto overlaps = [](const CellLane &p, const CellLane &q) { return p.x0 < q.x1 && q.x0 < p.x1; };
+        // the lane centres keep half a lane from the innermost round, like the slic3r fill
+        for (const auto &lanes_area: offset_ex(ExPolygons{r}, -float(d) / 2)) {
+            const BoundingBox bb = lanes_area.bounding_box();
+            const coord_t h = bb.max.y - bb.min.y;
+            const int rows = h / d + 1;
+            // the room that's left over goes to both sides equally
+            const coord_t y0 = bb.min.y + (h - coord_t(rows - 1) * d) / 2;
+            std::vector<int> open;
+            for (int k = 0; k < rows; k++) {
+                const coord_t y = y0 + coord_t(k) * d;
+                Polyline line;
+                line.points = {Point(bb.min.x - d, y), Point(bb.max.x + d, y)};
+                std::vector<CellLane> row;
+                for (const auto &c: intersection_pl(Polylines{line}, (Polygons) lanes_area)) {
+                    coord_t x0 = c.first_point().x, x1 = c.last_point().x;
+                    if (x0 > x1) std::swap(x0, x1);
+                    if (x1 - x0 > scale_(0.02)) row.push_back({x0, x1, y});
+                }
+                std::sort(row.begin(), row.end(), [](const CellLane &p, const CellLane &q) { return p.x0 < q.x0; });
+
+                std::vector<std::tuple<coord_t, int, int>> pairs;  // overlap, cell, lane
+                for (int c: open) {
+                    const CellLane &last = cells[c].lanes.back();
+                    for (size_t j = 0; j < row.size(); j++) {
+                        if (!overlaps(last, row[j])) continue;
+                        if (!inside(Point(last.x0, last.y), Point(row[j].x0, row[j].y)) ||
+                            !inside(Point(last.x1, last.y), Point(row[j].x1, row[j].y))) continue;
+                        // a lane end far beyond the last one is a step in the edge: the way there would run along the
+                        // new lane and back
+                        if (std::abs(last.x0 - row[j].x0) > 6 * d || std::abs(last.x1 - row[j].x1) > 6 * d) continue;
+                        pairs.emplace_back(std::min(last.x1, row[j].x1) - std::max(last.x0, row[j].x0), c, int(j));
+                    }
+                }
+                std::sort(pairs.begin(), pairs.end(),
+                          [](const auto &p, const auto &q) { return std::get<0>(p) > std::get<0>(q); });
+                std::vector<int> cell_of(row.size(), -1);
+                std::vector<int> taken;
+                for (const auto &[overlap, c, j]: pairs) {
+                    if (cell_of[j] >= 0 || std::find(taken.begin(), taken.end(), c) != taken.end()) continue;
+                    cell_of[j] = c;
+                    taken.push_back(c);
+                }
+                std::vector<int> next;
+                for (size_t j = 0; j < row.size(); j++) {
+                    if (cell_of[j] >= 0) {
+                        cells[cell_of[j]].lanes.push_back(row[j]);
+                    } else {
+                        cells.push_back({{row[j]}});
+                        cell_of[j] = int(cells.size()) - 1;
+                    }
+                    next.push_back(cell_of[j]);
+                }
+                open = next;
+            }
+        }
+    }
+    return cells;
+}
+
+// Poses every 10 cm along the line, each pointing to the next
+slic3r_coverage_planner::Path linePath(std_msgs::Header &header, Polyline line, bool is_outline) {
+    slic3r_coverage_planner::Path path;
+    path.is_outline = is_outline;
+    path.path.header = header;
+    line.remove_duplicate_points();
+    auto points = line.equally_spaced_points(scale_(0.1));
+    if (points.size() < 2) return path;
+    for (size_t k = 0; k < points.size(); k++) {
+        geometry_msgs::PoseStamped pose;
+        pose.header = header;
+        if (k + 1 < points.size()) {
+            const auto dir = points[k + 1] - points[k];
+            tf2::Quaternion q(0.0, 0.0, atan2(dir.y, dir.x));
+            pose.pose.orientation = tf2::toMsg(q);
+        } else {
+            pose.pose.orientation = path.path.poses.back().pose.orientation;
+        }
+        pose.pose.position.x = unscale(points[k].x);
+        pose.pose.position.y = unscale(points[k].y);
+        pose.pose.position.z = 0;
+        path.path.poses.push_back(pose);
+    }
+    return path;
+}
+
+// Appends the rounds around obstacles and the cells in the order with the least driving in between, starting where
+// the paths so far end. A cell may start in any of its four corners, the rounds keep their direction
+void appendCells(slic3r_coverage_planner::PlanPathResponse &res, std_msgs::Header &header, Polygon &outline_poly,
+                 std::vector<Polygons> &obstacle_outlines, const std::vector<Cell> &cells, double angle) {
+    std::vector<std::vector<slic3r_coverage_planner::Path>> items;
+    for (auto &group: obstacle_outlines) {
+        auto path = determinePathForOutline(header, outline_poly, group, true, nullptr);
+        if (path.path.poses.empty()) continue;
+        std::reverse(path.path.poses.begin(), path.path.poses.end());
+        items.push_back({path});
+    }
+    for (const auto &cell: cells) {
+        std::vector<slic3r_coverage_planner::Path> variants;
+        for (int left = 0; left < 2; left++) {
+            Polyline zigzag;
+            for (size_t k = 0; k < cell.lanes.size(); k++) {
+                const CellLane &lane = cell.lanes[k];
+                const bool right = (k % 2 == 0) == (left == 1);
+                zigzag.points.push_back(Point(right ? lane.x0 : lane.x1, lane.y));
+                zigzag.points.push_back(Point(right ? lane.x1 : lane.x0, lane.y));
+            }
+            zigzag.rotate(angle);
+            auto path = linePath(header, zigzag, false);
+            if (path.path.poses.empty()) continue;
+            variants.push_back(path);
+            zigzag.reverse();
+            variants.push_back(linePath(header, zigzag, false));
+        }
+        if (!variants.empty()) items.push_back(variants);
+    }
+    if (items.empty()) return;
+
+    const auto dist = [](const geometry_msgs::PoseStamped &a, const geometry_msgs::PoseStamped &b) {
+        return std::hypot(a.pose.position.x - b.pose.position.x, a.pose.position.y - b.pose.position.y);
+    };
+    const geometry_msgs::PoseStamped start =
+            res.paths.empty() ? items.front().front().path.poses.front() : res.paths.back().path.poses.back();
+    const auto cost = [&](const std::vector<std::pair<int, int>> &order) {
+        geometry_msgs::PoseStamped pos = start;
+        double c = 0;
+        for (const auto &[i, v]: order) {
+            c += dist(pos, items[i][v].path.poses.front());
+            pos = items[i][v].path.poses.back();
+        }
+        return c;
+    };
+
+    // nearest first, then move single items to another place or corner as long as that saves driving
+    std::vector<std::pair<int, int>> order;
+    std::vector<bool> used(items.size(), false);
+    geometry_msgs::PoseStamped pos = start;
+    for (size_t n = 0; n < items.size(); n++) {
+        int bi = -1, bv = 0;
+        double bd = 0;
+        for (size_t i = 0; i < items.size(); i++) {
+            if (used[i]) continue;
+            for (size_t v = 0; v < items[i].size(); v++) {
+                const double d = dist(pos, items[i][v].path.poses.front());
+                if (bi < 0 || d < bd) {
+                    bi = i;
+                    bv = v;
+                    bd = d;
+                }
+            }
+        }
+        used[bi] = true;
+        order.push_back({bi, bv});
+        pos = items[bi][bv].path.poses.back();
+    }
+    for (bool improved = true; improved;) {
+        improved = false;
+        const double current = cost(order);
+        for (size_t a = 0; a < order.size() && !improved; a++) {
+            auto rest = order;
+            const int item = rest[a].first;
+            rest.erase(rest.begin() + a);
+            for (size_t b = 0; b <= rest.size() && !improved; b++) {
+                for (size_t v = 0; v < items[item].size() && !improved; v++) {
+                    auto candidate = rest;
+                    candidate.insert(candidate.begin() + b, {item, int(v)});
+                    if (cost(candidate) < current - 1e-6) {
+                        order = candidate;
+                        improved = true;
+                    }
+                }
+            }
+        }
+    }
+    for (const auto &[i, v]: order) res.paths.push_back(items[i][v]);
+}
+
 bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_planner::PlanPathResponse &res) {
 
     Slic3r::Polygon outline_poly;
@@ -481,7 +687,10 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     }
 
 
-    if (!req.skip_fill) {
+    std::vector<Cell> cells;
+    if (!req.skip_fill && cell_fill) {
+        cells = buildCells(inner, req.angle, scale_(req.distance));
+    } else if (!req.skip_fill) {
         ExPolygons expp = union_ex(inner);
 
 
@@ -540,6 +749,12 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         if (!path.path.poses.empty()) {
             res.paths.push_back(path);
         }
+    }
+
+    if (cell_fill) {
+        appendCells(res, header, outline_poly, obstacle_outlines, cells, req.angle);
+        // already in, the slic3r order below has nothing left to do
+        obstacle_outlines.clear();
     }
 
     // The order for 3d printing seems to be to sweep across the X and then up the Y axis
@@ -668,6 +883,7 @@ int main(int argc, char **argv) {
     ros::NodeHandle paramNh("~");
 
     visualize_plan = paramNh.param("visualize_plan", true);
+    cell_fill = paramNh.param("cell_fill", false);
 
     if (visualize_plan) {
         marker_array_publisher = n.advertise<visualization_msgs::MarkerArray>(
